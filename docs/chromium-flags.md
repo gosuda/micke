@@ -43,8 +43,9 @@ gvx sizes `/dev/shm` to half of host RAM and refuses explicit tmpfs mounts at
 
 - `agent-desktop press` SIGSEGVs chromium here (25/29 combos, rc 139, receipt
   still `ok:true` / `delivered_unverified`). Use `micke-key <combo>` (xdotool)
-  — it proves delivery, not effect; verify with `micke-state`. `click`/`type`
-  are unaffected.
+  — it proves delivery, not effect; verify with `micke-state`. `click` is
+  unaffected; `type` is refused by real pages (ACTION_NOT_SUPPORTED /
+  POLICY_DENIED) — type with `micke-type '<text>'` (click the field first).
 - A dead browser is silent: `list-apps`, `list-windows`, `screenshot` and
   `session_list` all keep answering `ok` on a dead desktop. `micke-state`
   (exit 1) is the honest probe.

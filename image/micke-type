@@ -1,0 +1,113 @@
+#!/bin/sh
+# micke-type — type text into the focused page field: clipboard, then ctrl+v.
+#
+# WHY: `agent-desktop type` is refused by real pages on this image: naver.com's
+# homepage search box (role=search container) answers ACTION_NOT_SUPPORTED,
+# and comic.naver.com's genuine textfield answers POLICY_DENIED. The
+# combination that works is xclip on the clipboard in daemon mode + ONE
+# `xdotool key ctrl+v` (the micke-key path). xclip must NOT run with
+# `-loops 1`: chromium probes the selection with a TARGETS request first,
+# which consumes the only loop, so the paste itself comes up empty. Daemon
+# mode (no -loops) serves both requests.
+#
+# As with micke-key, this proves DELIVERY (clipboard verified by read-back,
+# ctrl+v sent), not app-level effect: confirm the field's value with ONE
+# filtered snapshot, e.g.
+#   agent-desktop snapshot --app chromium -i --compact \
+#     | jq -r '.. | objects | select(.name?=="<field label>") | .value'
+# (by name, not role: the address bar is also a textfield and comes first)
+#
+# Click the field first so it has focus; ctrl+v follows X input focus, so
+# the chromium window is resolved and activated exactly as micke-key does.
+#
+# Usage:
+#   micke-type 네이버 웹툰          # one arg, any text (quote spaces)
+#   micke-type -h                   # this text; sends nothing
+#
+# stdout: one line, e.g. {"sent":true,"combo":"ctrl+v","bytes":21,"window":"네이버 - Chromium"}
+# Exit 2 on bad usage, 1 when the clipboard, window or focus check fails.
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+usage: micke-type <text>
+
+  micke-type 'hello world'   set <text> on the clipboard, then ctrl+v
+  micke-type '네이버 웹툰'     any single argument; quote spaces
+
+Click the input field first (it must have focus). The text is placed on the
+clipboard with xclip in daemon mode (NOT -loops 1: chromium's TARGETS probe
+eats the only loop) and verified by read-back before ONE ctrl+v is sent to
+the chromium window. Delivery only — verify the field's value with a
+filtered snapshot or `micke-state`.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    "") usage >&2; exit 2 ;;
+esac
+
+if [ $# -ne 1 ]; then
+    echo "micke-type: exactly one text argument (got $# arguments; quote spaces)" >&2
+    exit 2
+fi
+text=$1
+
+for tool in xclip xdotool; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || { echo "micke-type: $tool is not installed" >&2; exit 1; }
+done
+
+# First visible window whose title carries the app name. A dead browser leaves
+# no window at all — this is the loud failure the a11y surfaces don't give.
+win=$(xdotool search --onlyvisible --name 'Chromium' 2>/dev/null | head -n 1)
+if [ -z "$win" ]; then
+    echo "micke-type: no chromium window on ${DISPLAY:-<no DISPLAY>} (browser dead or never launched; relaunch with micke-chromium <url>)" >&2
+    exit 1
+fi
+
+title=$(xdotool getwindowname "$win" 2>/dev/null || true)
+
+# `key` follows X input focus, not the id we resolved, so activate and check.
+xdotool windowactivate --sync "$win" 2>/dev/null || true
+active=$(xdotool getactivewindow 2>/dev/null || true)
+if [ "$active" != "$win" ]; then
+    echo "micke-type: could not focus chromium window $win (active: ${active:-none}); nothing sent" >&2
+    exit 1
+fi
+
+# Daemon mode: no -loops, so the xclip child serves every request chromium
+# makes (TARGETS probe, then the paste) until the next owner takes over.
+printf '%s' "$text" | xclip -selection clipboard -in \
+    || { echo "micke-type: xclip failed to take the clipboard (DISPLAY=${DISPLAY:-none})" >&2; exit 1; }
+
+# Settle: the forked child may own the selection a beat after the parent
+# exits. Read back until it answers with the text (a couple of X round
+# trips; bounded so a dead clipboard fails in well under a second). The
+# read-back request itself costs nothing — the daemon serves indefinitely.
+# Both sides go through command substitution, which strips trailing
+# newlines: text ending in them still pastes them; the check ignores that
+# tail on purpose.
+want=$(printf '%s' "$text")
+got=""
+i=0
+while [ "$got" != "$want" ] && [ "$i" -lt 5 ]; do
+    i=$((i + 1))
+    got=$(xclip -selection clipboard -out 2>/dev/null) || got=""
+    [ "$got" != "$want" ] && sleep 0.1
+done
+if [ "$got" != "$want" ]; then
+    echo "micke-type: clipboard read-back mismatch; nothing pasted" >&2
+    exit 1
+fi
+
+xdotool key --clearmodifiers ctrl+v \
+    || { echo "micke-type: xdotool rejected the paste" >&2; exit 1; }
+
+bytes=$(printf '%s' "$text" | wc -c | tr -d ' ')
+
+# Hand-rolled escaping keeps the dependency list at xclip + xdotool.
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+printf '{"sent":true,"combo":"ctrl+v","bytes":%s,"window":"%s"}\n' "$bytes" "$(esc "$title")"

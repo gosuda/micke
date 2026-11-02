@@ -102,6 +102,12 @@ RUN chmod 0755 /usr/local/bin/micke-state
 COPY image/micke-key /usr/local/bin/micke-key
 RUN chmod 0755 /usr/local/bin/micke-key
 
+# Text path: `agent-desktop type` is refused by real pages (ACTION_NOT_SUPPORTED
+# on search containers, POLICY_DENIED on textfields); xclip daemon-mode +
+# micke-key's ctrl+v delivers it.
+COPY image/micke-type /usr/local/bin/micke-type
+RUN chmod 0755 /usr/local/bin/micke-type
+
 # Find a click target by name WITHOUT `agent-desktop find`, which needs two
 # stable passes of a mutating tree and spends its whole budget. One compact
 # snapshot plus a guest-side jq filter; retries only on truncated:true.
