@@ -9,21 +9,28 @@ landscape, 2026); the underlying studies modified no repo files.
 > **Revision 2026-11-02:** adds owner requirements **R1** session UI (web page of all
 > running micke sessions), **R2** manual VNC intervention (open a session's noVNC and
 > operate the desktop by hand, e.g. a login the agent shouldn't do), **R3** MCP shell tool
-> (one shell channel for ALL CLI usage incl. every `agent-desktop` call — no proxies).
+> (one shell channel for ALL CLI usage incl. every `agent-desktop` call — no proxies);
+> and the **pull-only registry image model** — no image builds in user scenarios.
 
 Frame: the primary user is a developer — or their coding agent as MCP client (e.g. Claude
 Code) — using micke sessions as a **throwaway real GUI** to build, run, exercise, and verify
-software. Stack today: Debian + Xvfb `:99` + openbox + AT-SPI, chromium, `agent-desktop`
-v1.0.2 (`snapshot -i` → stable `@ref`s → `click`/`type` → re-snapshot; JSON receipts;
-`screenshot`; `wait --window`; `list-apps`), x11vnc `:5900` + noVNC `:6080` per session
-(bidirectional input, optional `MICKE_VNC_PASSWORD`, non-fatal to the session), Docker
-(`docker exec` + `/tmp/session.env`) or gvx (`rungv run -i`, no exec/daemon; stdin line
-channel with `===BEGIN===`/`===END rc=N===` framing). The MCP layer is **planned, not
-built**; per R3 its entire surface is `session.create` / `session.list` / `session.close`
-plus **one persistent shell tool** per session (replacing the old "agent-desktop proxy
-tools" idea). The supervisor — one host process per session owning the runtime child
-(feasibility §6) — also serves a **session dashboard** (R1) at e.g. `127.0.0.1:7800`;
-manual VNC intervention (R2) becomes a designed flow.
+software. Image model (owner decision): **pull-only** — sessions start from a pre-built
+registry image (default pinned ref, e.g. `ghcr.io/…/micke:<tag>`; variants
+`micke:latest`/`gtk`/`node`); micke's own build/publish is project CI, outside user
+flows. User flow: **pull → create session → shell → destroy** — pull-if-missing before
+a session starts, sessions run `--pull=never` from cache (verified under gvx), never a
+pull beside a live session (OOM lesson, B1). Stack today: Debian + Xvfb `:99` + openbox
++ AT-SPI, chromium, `agent-desktop` v1.0.2 (`snapshot -i` → stable `@ref`s →
+`click`/`type` → re-snapshot; JSON receipts; `screenshot`; `wait --window`;
+`list-apps`), x11vnc `:5900` + noVNC `:6080` per session (bidirectional input, optional
+`MICKE_VNC_PASSWORD`, non-fatal to the session), Docker (`docker exec` +
+`/tmp/session.env`) or gvx (`rungv run -i`, no
+exec/daemon; stdin line channel with `===BEGIN===`/`===END rc=N===` framing). The MCP
+layer is **planned, not built**; per R3 its entire surface is `session.create` /
+`session.list` / `session.close` plus **one persistent shell tool** per session. The
+supervisor — one host process per session owning the runtime child (feasibility §6) —
+also serves a **session dashboard** (R1) at e.g. `127.0.0.1:7800`; manual VNC
+intervention (R2) becomes a designed flow.
 
 ## 1. Personas
 
@@ -34,14 +41,15 @@ agent is blind on the desktop build ("tests pass, app won't even launch" escapes
 headless chromium hides extension, WebGL, and font-rendering issues; agents must not touch
 her laptop. Wants (R1) every running session visible on one page; wants (R2) to do the
 staging sync's SSO login herself, by hand, inside the sandbox — the credential never
-reaches the agent.
+reaches the agent. Sessions run the pre-pulled `micke:gtk` variant.
 
 **P2 — Marcus, QA/platform engineer.** Owns the E2E suite (nightly + per-release). Today:
 Playwright grid, chromium-only, CI-minute billing, flaky auth-state tests. Pains: login
 state and extensions are untestable in the grid; the Linux `.deb`/AppImage artifact has no
 test story at all; failure evidence is a video nobody scrubs through. Wants (R1) on-call
 to see the whole nightly run at a glance — running/stuck/dead, memory pressure, one URL,
-no SSH — and (R2) a way for a human to log in mid-run without breaking it.
+no SSH — and (R2) a way for a human to log in mid-run without breaking it. His runner
+warmup pre-pulls digest-pinned variant images before the suite starts.
 
 **P3 — Tomasz, solo maintainer of a GTK4 utility.** 4k GitHub stars, zero budget; tests by
 booting a VM by hand before releases. Pains: no CI can click a Linux GUI app; screenshots
@@ -52,15 +60,17 @@ pasted into issues prove nothing about *sequence*.
 ### A. Inner-loop GUI testing by a coding agent (P1, interactive)
 
 1. Priya asks Claude Code: "the Start-Timer button deadlocks after suspend — fix it and
-   prove the fix." The agent calls `mcp__micke__session_create {image: "micke:dev"}`
-   (PLANNED; today `docker run -d --init --shm-size=1g -p 127.0.0.1:6080:6080 micke:dev`,
-   ready on `:99` in ~0.5 s). The supervisor registers it; its dashboard row (R1) flips
-   to `ready` with its noVNC link.
+   prove the fix." The agent calls `mcp__micke__session_create {image:
+   "ghcr.io/…/micke:gtk"}` (PLANNED) — a registry variant tag, never a local build; the
+   supervisor pulls the pinned ref if missing, then runs from cache (manual equivalent
+   today: `docker run -d --init --shm-size=1g -p 127.0.0.1:6080:6080 <ref>`, ready on
+   `:99` in ~0.5 s); its dashboard row (R1) flips `ready` with its noVNC link.
 2. The agent stages the repo and builds **through the session's persistent shell tool**
    (R3): one long-lived shell per session, `cd` and env persisting across invocations —
    under Docker it wraps `docker exec` and sources `/tmp/session.env` automatically, under
-   gvx it is the verified stdin line channel. `apt-get install -y libgtk-4-dev && make
-   deb` — untrusted build output stays inside the sandbox; Priya's host stays clean.
+   gvx it is the verified stdin line channel. Building **her own app** in-session is
+   core: the `gtk` variant ships the toolchain, so `make deb` runs at once (`apt-get
+   install -y libgtk-4-dev` only on base) — untrusted output stays in the sandbox.
 3. The app installs a `.desktop` entry, so `agent-desktop list-apps` (via the same shell)
    shows `tick`; `agent-desktop launch tick` returns a receipt with window `bounds` and
    `accessible:true` — first assertion: the app boots and exposes an a11y tree. The
@@ -77,24 +87,27 @@ pasted into issues prove nothing about *sequence*.
    patches, rebuilds (same shell), re-runs step 4 green; `agent-desktop screenshot
    /tmp/evidence.png` (102 KB measured) goes to the PR with the receipts.
 7. `mcp__micke__session_close` → `docker rm -f` (~1 s) or SIGKILL of the `rungv` child
-   (0.52 s, zero strays); the dashboard row disappears. Nothing persists — the next task
-   gets an identical desk.
+   (0.52 s, zero strays); the dashboard row disappears. Nothing persists — the next
+   task gets the same digest-pinned desk, bit for bit.
 
 ### B. E2E regression suite on CI (P2, headless-of-headless)
 
-1. Nightly job on a self-hosted runner; image preloaded once (`docker pull`, or
-   `docker save micke:dev | rungv load` — 8 s for 388 MB — then `--pull=never`). A micke
-   **supervisor** (PLANNED) boots N parallel sessions: ≈ 8 concurrent chromium sessions
-   per 8 GiB host on Docker; ≈ 2 on gvx (~2 GiB PSS each).
+1. Nightly job on a self-hosted runner. **Warmup pre-pulls the digest-pinned variant
+   images before any session starts** (`docker pull`, or `rungv pull` on gvx hosts —
+   registry pulls verified); sessions then run `--pull=never` from cache, and nothing
+   pulls beside a live session — the study saw the host OOM killer fire once when a
+   pull overlapped a sandbox. A micke **supervisor** (PLANNED) boots N parallel
+   sessions: ≈ 8 concurrent chromium sessions per 8 GiB host on Docker; ≈ 2 on gvx
+   (~2 GiB PSS each).
 2. The whole run is visible on the supervisor dashboard (R1): one row per session — id,
    runtime (docker/gvx), status, uptime, memory, running windows, noVNC link. On-call
    watches the grid at `http://127.0.0.1:7800`; the memory column warns when a gvx host
    is about to tip into the OOM killer.
-3. Each session is one test group: fresh container, deterministic image, fixed 1280x800
-   canvas — no "works on my resolution" flakes. Tests are **scripted bash + agent-desktop
-   through the same shell channel (R3), not LLM-driven** (the market's cheap "CLI-skill"
-   pattern): each step checks `"ok":true` and a ref assertion via `jq`; failure exits
-   non-zero with the receipt attached.
+3. Each session is one test group: fresh container, digest-pinned image identical on
+   every runner, fixed 1280x800 canvas — no "works on my resolution" flakes. Tests are
+   **scripted bash + agent-desktop through the same shell channel (R3), not LLM-driven**
+   (the market's cheap "CLI-skill" pattern): each step checks `"ok":true` and a ref
+   assertion via `jq`; failure exits non-zero with the receipt attached.
 4. Browser realism the grid can't do: chromium with `--load-extension` via `--arg=`, WebGL
    on a real X server (not `--headless=new`), `--force-renderer-accessibility`;
    `/dev/shm` is 1 GiB under Docker, 3.9 GiB under gvx — no `--disable-dev-shm-usage`.
@@ -113,11 +126,12 @@ pasted into issues prove nothing about *sequence*.
    in a micke session and **sends the designer the session's noVNC URL** — from the
    dashboard row or `session.list`, not hand-copied from rungv stderr.
 2. They watch live at 1:1 while the agent drives: `agent-desktop snapshot --app tick -i` →
-   `click "@…:e31"` (Export) → `type "report.csv"` → the bug fires. The humans see the exact
-   keystroke loss in real time — what a screenshot in the issue never showed.
-3. noVNC is bidirectional: the designer grabs the mouse and demonstrates the "correct" feel
-   of the dialog while the agent waits; then re-runs its script. This is the same mechanism
-   R2 formalizes for login/takeover — a feature, not an accident. (Also a hazard — risks.)
+   `click "@…:e31"` (Export) → `type "report.csv"` → the bug fires. The humans see the
+   exact keystroke loss in real time — what a screenshot in the issue never showed.
+3. noVNC is bidirectional: the designer grabs the mouse and demonstrates the "correct"
+   feel of the dialog while the agent waits; then re-runs its script. This is the same
+   mechanism R2 formalizes for login/takeover — a feature, not an accident. (Also a
+   hazard — risks.)
 4. Agent patches, rebuilds in the same session, replays the script: `snapshot → type →
    re-snapshot` receipts turn green, posted with before/after screenshots. For design
    review it "auditions" states on demand — empty state / error toast / long-username
@@ -133,7 +147,9 @@ pasted into issues prove nothing about *sequence*.
 | R1 session dashboard (status at a glance) | **PLANNED** | Supervisor serves ~`127.0.0.1:7800`: id, runtime, status, uptime, memory, running windows (`agent-desktop list-windows` via the shell channel), per-session noVNC link + embedded iframe. New web surface to build, maintain, and secure |
 | R3 persistent shell tool — ONE channel for all CLI incl. every `agent-desktop` call | HAS (mechanism) / **PLANNED** (tool) | Replaces the old "agent-desktop proxy tools" idea. Docker: `docker exec` + auto-source of `/tmp/session.env` verified by hand; gvx: stdin line channel with `===BEGIN/===END rc=N===` framing verified. MCP wrapper (PTY/long-lived shell, persistent env + cwd) not built |
 | A2 repo staging / workspace bind | **GAP** | `docker cp` manual only; no micke workspace/artifact tooling; gvx needs `-v` bind decided at start |
-| A2 build deps preinstalled (toolchain image) | **GAP** | Everything is `apt-get install` per session; no derived-image/baking story → slow loops |
+| A2 in-session build of the user's own app | HAS | deps + `make deb` + install + GUI-test, all inside the session over the shell channel (R3) — the user's app, never micke's image |
+| Image distribution — pre-built registry pull (default pinned ref + variants) | **PLANNED** | Project CI publishes `ghcr.io/…/micke:<tag>`; supervisor policy: pull-if-missing before a session starts (warmup/pre-pull — supervisor startup or explicit pull — covers CI runners), sessions run `--pull=never` from cache, never a pull beside live sessions (OOM lesson). Mechanism verified: `docker pull` native, `rungv pull` works. Maintainer escape hatch (`docker build` + `docker save \| rungv load`) exists, out of scenario scope |
+| Official toolchain variant images (`micke:latest` / `gtk` / `node`) | **PLANNED** | Biked toolchains per variant tag; users pick a tag, still pull-only — removes the per-session `apt-get` tax that slowed loops. Custom derived images (`FROM micke:…`) = power-user flow outside this doc's scope |
 | A3–A6 snapshot → `click @ref` → verify (incl. custom apps) | HAS | agent-desktop 1.0.2 via AT-SPI; 83 refs on example.com, identical Docker/gvx; GTK/Qt/Tauri a11y untested |
 | A6 / B6 screenshot + receipt artifacts out of session | PARTIAL | PNG works in-session (102 KB); retrieval = base64 (works) or bind (PLANNED tool); no artifact convention / report integration |
 | A7 teardown, nothing left behind | HAS | `docker rm -f` ~1 s; gvx kill 0.52 s, zero strays |
@@ -152,10 +168,10 @@ pasted into issues prove nothing about *sequence*.
    loop — for a whole desktop, not just a browser tab. micke supplies the missing *place*
    where that loop runs against non-headless targets.
 2. **Disposability matches test-fixture semantics 1:1.** One MCP session = one fresh,
-   deterministic desk; teardown in ~0.5–1 s with zero residue — precisely what a test
-   `setup()`/`teardown()` wants, and what no current sandbox offers: every coding-agent
-   sandbox in 2026 (E2B, OpenHands, Sandvault, Sculptor) is headless-terminal only.
-   "Sandbox with a screen" is an open slot.
+   deterministic desk — digest-pinned, the same image on every host; teardown in
+   ~0.5–1 s with zero residue — precisely what a test `setup()`/`teardown()` wants, and
+   what no current sandbox offers: every coding-agent sandbox in 2026 (E2B, OpenHands,
+   Sandvault, Sculptor) is headless-terminal only. "Sandbox with a screen" is an open slot.
 3. **Receipts are assertion-ready today.** agent-desktop returns structured JSON (`ok`,
    `steps[].mechanism`, window titles, ref counts) — CI asserts without OCR or pixel
    matching; screenshots are evidence, not mechanism. Most of scenario B runs on the binary
@@ -190,9 +206,9 @@ pasted into issues prove nothing about *sequence*.
    flakiness; the honest near-term product is scripted CI (B) plus supervised sessions (C),
    not set-and-forget agents.
 4. **Environment coverage gaps undercut the QA pitch.** Chromium-only (no Firefox/WebKit),
-   no persistent profiles (R2's login is per-run), no toolchain images, `apt-get` per
-   session, ~8 vs ~2 concurrent chromium sessions per host (Docker vs gvx) — too slow
-   for serious suites until image baking exists.
+   no persistent profiles (R2's login is per-run), toolchain variants still PLANNED
+   (`apt-get` per session on the base image until they ship), ~8 vs ~2 concurrent
+   chromium sessions per host (Docker vs gvx) — slow loops until the variants publish.
 5. **Dependency and operational sharp edges.** agent-desktop is a v1.0.2 vercel-labs
    binary; gvx is a 7-star single-maintainer pre-1.0 fork. Per-session port bookkeeping
    (Docker `-p` allocation, parsing the `rungv: publishing …` stderr line) is now
@@ -204,14 +220,20 @@ pasted into issues prove nothing about *sequence*.
    real frontend to maintain.
 7. **The shell tool is maximal capability by design — and stateful.** One channel means no
    action-level interception or auditing — the supervisor sees command strings and
-   whatever receipts the CLI prints, nothing finer (relevant if the security direction is
-   ever revisited: noVNC already lets a human do anything, now the agent gets full CLI
-   power too). Persistent shells carry state that must be defined away on `session.close`,
-   supervisor restart, or a dropped channel (cwd, env, background jobs — or sessions leak
-   PTYs). Human-vs-agent input arbitration on the shared X display stays unsolved.
+   whatever receipts the CLI prints, nothing finer (noVNC already lets a human do
+   anything; now the agent gets full CLI power too). Persistent shells carry state that
+   must be defined away on `session.close`, supervisor restart, or a dropped channel
+   (cwd, env, background jobs — or sessions leak PTYs). Human-vs-agent input arbitration
+   on the shared X display stays unsolved.
 8. **Manual intervention is a flow, not a feature flag.** R2 needs the agent to actually
    pause and resume observably — half of that is agent behavior (prompt/MCP contract), not
    micke code, and it will be tested by humans with mice at the worst moment.
+9. **Pull-only adds first-use network and registry dependencies.** Hundreds of MB before
+   the first session (local-first tension; one-time cache mitigates, warmup covers CI,
+   no offline cold-start story); ghcr rate limits or a deleted/renamed image breaks
+   pinned refs; supply chain: digest pinning now, signing (cosign) later.
+10. **Variant sprawl.** Each variant is a tag users must pick between and an image the
+    project must build, test, and keep fresh — maintenance cost per variant.
 
 ## 6. Verdict
 
@@ -221,11 +243,11 @@ bidirectional noVNC mirror, the daemon-free gvx option — composes into a produ
 landscape visibly lacks: a local, throwaway, *real* GUI that a coding agent or a CI
 script drives through the a11y-tree loop the ecosystem standardized on — with live
 oversight one browser tab away (R1), a human hand on the mouse when judgment or
-credentials are required (R2), over one minimal MCP surface (R3) that ages better than
-per-command proxies could. The scenarios map mostly onto HAS/PLANNED rows; the
-differentiators (real display, local-first, receipts, disposability, human-in-the-loop)
-are things headless sandboxes and playwright-mcp structurally don't offer. The work is
-plumbing — MCP session tools plus the persistent shell channel, a supervisor with
-per-session ports, the dashboard with noVNC URL discovery/relay, file/artifact staging,
-image baking — plus positioning against "headless is enough"; pre-MCP and chromium-only,
-micke stays a compelling demo, not a tool.
+credentials are required (R2), over one minimal MCP surface (R3). The scenarios map
+mostly onto HAS/PLANNED rows; the differentiators (real display, local-first, receipts,
+disposability, human-in-the-loop) are things headless sandboxes and playwright-mcp
+structurally don't offer. The work is plumbing — MCP session tools plus the persistent
+shell channel, a supervisor with per-session ports, the dashboard with noVNC URL
+discovery/relay, file/artifact staging, variant-image registry publishing plus a
+pull-if-missing supervisor policy — plus positioning against "headless is enough";
+pre-MCP and chromium-only, micke stays a compelling demo, not a tool.
