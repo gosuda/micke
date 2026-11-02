@@ -1,4 +1,4 @@
-# Manual intervention over noVNC (R2)
+# Manual intervention over noVNC
 
 One page: how a human takes over a live micke session to do the thing the
 agent must never do — type a credential, solve a CAPTCHA, make a judgment
@@ -9,14 +9,23 @@ call — and hand the desk back.
 1. **The agent announces the pause** — in its own words, to the human, naming
    the session: e.g. "I'm paused on session `a1b2c3d4` at the SSO login; I
    need a human to log in over noVNC."
-2. **The human opens that session's noVNC URL** — from `session_list` (live
+2. **The human opens that session's noVNC URL** — from `session_list` (ready
    rows carry `novnc_url`) or the dashboard table at
-   `http://127.0.0.1:7800/` (one row per session, link in the last column).
-   The browser shows and can drive the live desktop.
+   `http://127.0.0.1:7800/` (the default; `MICKE_PORT` changes it — one row
+   per session, noVNC link in the last column). Both the dashboard and the
+   noVNC URL are loopback-only, so the browser must run on (or tunnel to) the
+   daemon host.
+   The noVNC page shows and can drive the live desktop, but remote view is
+   non-fatal: if x11vnc/websockify are not running, the session still reports
+   `ready` and the URL can be dead; the agent can check `/tmp/x11vnc.log` and
+   `/tmp/novnc.log` in the session.
 3. **The human acts** — e.g. completes the SSO login. The credential goes
-   from the human's fingers into the desktop; it never enters any transcript,
-   tool call, or log (micke has no keylogger and no input API on the VNC
-   path — that's the point of doing it by hand).
+   from the human's fingers into the desktop, not through the agent: micke
+   has no keylogger and no VNC-side input API, so the credential does not
+   enter the transcript, a tool call, or micke's own logs. That is a property
+   of this path, not an enforced guarantee — micke does not control the
+   guest's x11vnc/websockify logs or the site you log into, and a secret
+   pasted into chat is in the transcript.
 4. **The human tells the agent to resume** — plain message: "logged in, go".
 5. **The agent resumes and verifies via receipts**, never by trusting the
    human's word alone:
@@ -34,7 +43,9 @@ the keyboard, inputs interleave — keystrokes go to whatever has focus,
 clicks land wherever the cursor is. This is unsolved by design in M-min.
 **Intervene only while the agent is paused** (that is why the pause
 announcement in step 1 names the session), and let the agent verify state
-from receipts when it resumes rather than assuming nothing moved.
+from receipts when it resumes rather than assuming nothing moved. "Paused"
+is a promise from the agent, not daemon state: micke has no pause flag and
+no human/agent input lock, so nothing enforces it.
 
 ## One copy-paste example prompt
 

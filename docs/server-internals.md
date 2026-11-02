@@ -18,9 +18,9 @@ Environment:
 | Variable                   | Default                          | Meaning                                    |
 | :--                        | :--                              | :--                                        |
 | `MICKE_IMAGE`              | `ghcr.io/gosuda/micke:latest`    | Default image for `session_create`         |
-| `MICKE_GVX_CACHE`          | `~/.cache/micke/gvx`             | EROFS layer cache (`-cache-dir` on every `rungv` call) |
+| `MICKE_GVX_CACHE`          | `$XDG_CACHE_HOME/micke/gvx` (`~/.cache/micke/gvx`) | EROFS layer cache (`-cache-dir` on image/run calls) |
 | `MICKE_RUNGV`              | `rungv`                          | rungv binary path                          |
-| `MICKE_STATE_DIR`          | `~/.local/state/micke`           | Pidfiles, per-session logs, instance lock  |
+| `MICKE_STATE_DIR`          | `$XDG_STATE_HOME/micke` (`~/.local/state/micke`) | Pidfiles, per-session logs, instance lock  |
 | `MICKE_SESSION_MEMORY`     | `2g`                             | Per-sandbox `rungv -m` guard               |
 | `MICKE_BOOT_TIMEOUT_MS`    | `30000`                          | Wait for the driver's `micke: desktop ready` line |
 | `MICKE_MIN_FREE_MB`        | `1024`                           | Free-RAM floor: refuse `session_create` when `MemAvailable` is below this many MiB (0 disables) |
@@ -39,7 +39,7 @@ gvx has no labels, no `ps`, and no daemon state. A session is ONE foreground
     ├── <id>.json                    { session_id, rungv_pid, hostname,
     │                                  shell_host_port, novnc_host_port,
     │                                  image, workspace, screen, created_at }
-    └── <id>.log                     child stdout+stderr (append-only)
+    └── <id>.log                     child stdout+stderr (truncated at start)
 ```
 
 The log is a **file**, not a pipe: a sandbox must survive daemon death, and a
@@ -96,8 +96,8 @@ by client. Startup prints one parseable stderr line:
 ## Dashboard
 
 The daemon serves ONE static route on `/`: a no-JS HTML table — one row per
-session: id, status, uptime, noVNC link (orphaned rows included; a link only
-when the pidfile has a port) — auto-refreshed by
+session: id, status, uptime, noVNC link (orphaned rows included, but only
+ready rows carry a link) — auto-refreshed by
 `<meta http-equiv="refresh" content="5">`. localhost-only bind is a security
 property; sharing beyond localhost is unsupported. Stdout
 stays clean; the dashboard never logs to it.
@@ -130,11 +130,11 @@ with `LOCK_HELD` (second supervisor on the same state dir) or `PORT_HELD`
 `session_create` spawns:
 
 ```
-rungv run -cache-dir <cache> --pull=never \
+rungv run -cache-dir <cache> -pull=never \
   -h micke-<id> -m <MICKE_SESSION_MEMORY, default 2g> \
   -e MICKE_SCREEN=<screen> -e MICKE_SHELL_PORT=7801 \
-  [-e MICKE_VNC_PASSWORD] [-v <host dir>:/workspace] \
   -p 7801 -p 6080 \
+  [-e MICKE_VNC_PASSWORD] [-v <host dir>:/workspace] \
   <image>
 ```
 
@@ -143,8 +143,9 @@ entrypoint **is** `micke-driver` (`image/driver.sh`), and gvisor's Sentry is
 the guest PID 1/reaper. `rungv` pre-binds both host ports before guest start
 and prints `rungv: publishing 127.0.0.1:<host> -> <guest>/tcp`; the supervisor
 polls the session log for those lines and persists them in the pidfile. It then
-waits for the driver's `micke: desktop ready` line (which is emitted only after
-`/tmp/session.env` exists and both the shell and noVNC listeners are dialable).
+waits for the driver's `micke: desktop ready` line. That line is emitted only
+after `/tmp/session.env` exists and the shell listener is dialable; noVNC is
+probed and reported up/down, but does not gate readiness.
 
 `/dev/shm`: gvx defaults it to half of host RAM (large enough for chromium);
 `rungv` (v0.4.x) refuses explicit tmpfs mounts at or below `/dev`, so micke
@@ -175,8 +176,9 @@ reconnects with a fresh shell, cwd/env reset — exec parity), while the
 desktop keeps running.
 
 At connection start the guest bash waits for and sources `/tmp/session.env`
-(DISPLAY, D-Bus, AT-SPI) — so `agent-desktop` works with no manual env setup —
-enables `set -m`, defines `__micke_run`, and prints `===SHELL_READY===`.
+(DISPLAY and the D-Bus session bus; AT-SPI is discovered through it) — so
+`agent-desktop` works with no manual env setup — enables `set -m`, defines
+`__micke_run`, and prints `===SHELL_READY===`.
 Commands are base64-encoded so newlines are safe; the host writes one request
 line and parses one frame back:
 
@@ -188,12 +190,13 @@ guest -> host:
   <stderr bytes>\n[===TIMEOUT===\n]\n===END rc=N===\n
 ```
 
-The `\n` before each marker is always printed, so stdout/stderr are byte-exact
-(a stream's trailing newline, or lack of one, survives the round trip). The
-first `\n===STDERR===\n` separates the streams; `===END rc=N===` is the exact
-verified end pattern. Output beyond `max_output_bytes` (default 256 KiB) per
-stream is cut by the wrapper and ends with `…[truncated N bytes]` (N = dropped
-bytes); the host re-checks the cap defensively.
+The `\n` before each marker that follows a payload is always printed, so
+stdout/stderr are byte-exact (a stream's trailing newline, or lack of one,
+survives the round trip). The first `\n===STDERR===\n` separates the streams;
+`===END rc=N===` is the exact verified end pattern. Output beyond
+`max_output_bytes` (default 256 KiB) per stream is cut by the wrapper and ends
+with `…[truncated N bytes]` (N = dropped bytes); the host re-checks the cap
+defensively.
 
 Mechanics inside the wrapper (baked into the image at `/tmp/handler.sh`):
 
@@ -240,8 +243,9 @@ Mechanics inside the wrapper (baked into the image at `/tmp/handler.sh`):
 All end-to-end against real gvx on this host; every suite spawns the real
 daemon as a subprocess on a kernel-picked port (`MICKE_PORT=0`) and talks MCP
 over Streamable HTTP (`tests/helpers.ts`). The shared image comes from
-`MICKE_TEST_IMAGE` (default `ghcr.io/gosuda/micke:latest`) and is pulled once
-into `MICKE_GVX_CACHE` / `MICKE_TEST_CACHE_DIR` if missing:
+`MICKE_TEST_IMAGE` (else `MICKE_IMAGE`; default
+`ghcr.io/gosuda/micke:latest`) and is pulled once into `MICKE_TEST_CACHE_DIR`
+(else `MICKE_GVX_CACHE`, else the default cache) if missing:
 
 - `bun test tests/mmin-phase1.test.ts` — daemon over HTTP, create → noVNC
   HTTP 200, `agent-desktop` status/launch/wait/snapshot, shell persistence,

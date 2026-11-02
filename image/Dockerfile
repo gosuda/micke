@@ -76,5 +76,6 @@ RUN chmod 0755 /usr/local/bin/micke-chromium
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
-# Chromium needs >64MB of /dev/shm: micke runs with `-tmpfs /dev/shm:size=1g`.
+# Chromium needs >64MB of /dev/shm. Under gvx it defaults to half of host
+# RAM; micke adds no tmpfs flag (explicit mounts at/below /dev are refused).
 ENTRYPOINT ["/usr/local/bin/micke-driver"]

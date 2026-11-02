@@ -48,12 +48,13 @@ bun start
 ```
 
 Then create a session through any MCP client. Every created session reports a
-`novnc_url`; open it in a browser to watch (or drive) the live desktop.
+`novnc_url`; when noVNC is up, open it in a browser to watch (or drive) the
+live desktop.
 
 ```sh
 # maintainer smoke test: boot the image directly, watch the publish lines,
 # open the port forwarded for 6080 (the shell listener is 7801)
-rungv run --pull=never -m 2g -p 7801 -p 6080 ghcr.io/gosuda/micke:latest
+rungv run -cache-dir ~/.cache/micke/gvx -pull=never -m 2g -p 7801 -p 6080 ghcr.io/gosuda/micke:latest
 # rungv: publishing 127.0.0.1:38271 -> 6080/tcp
 # open http://127.0.0.1:38271/vnc.html
 ```
@@ -65,11 +66,12 @@ pixel matching.
 
 ## View the desktop in a browser (noVNC)
 
-Every micke session mirrors its Xvfb display through **x11vnc** on guest port
-`5900` and serves the **noVNC** web client through websockify on guest port
-`6080`. micke publishes `6080` with `rungv -p` (kernel-picked host port,
-loopback-only) and puts the URL in `session_create`, `session_list`, and the
-dashboard.
+When noVNC is up, each micke session mirrors its Xvfb display through
+**x11vnc** on guest port `5900` and serves the **noVNC** web client through
+websockify on guest port `6080`. micke publishes `6080` with `rungv -p`
+(kernel-picked host port, loopback-only) and puts the URL in `session_create`,
+ready rows of `session_list`, and the dashboard. noVNC startup is best-effort:
+a session can be `ready` with a `novnc_url` whose viewer is down.
 
 - **Ports are fixed inside the guest** (`5900` VNC, `6080` noVNC); the host
   port is picked by gvx at launch and recorded in the session pidfile, so it
@@ -112,8 +114,8 @@ the shell-channel protocol, adoption semantics, and the integration tests
 
 - Driving chromium in a session — required flags, `--arg=` passthrough,
   /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
-- Pausing so a human can log in over noVNC (credentials never enter the
-  transcript): [docs/manual-intervention.md](docs/manual-intervention.md)
+- Pausing so a human can log in over noVNC (the credential goes straight into
+  the desktop, not the transcript): [docs/manual-intervention.md](docs/manual-intervention.md)
 
 ## Environment
 
@@ -121,12 +123,13 @@ the shell-channel protocol, adoption semantics, and the integration tests
 | :-- | :-- | :-- |
 | `MICKE_PORT` | `7800` | Daemon port on 127.0.0.1 — MCP + dashboard (`0` = kernel-picked) |
 | `MICKE_IMAGE` | `ghcr.io/gosuda/micke:latest` | Default OCI image for `session_create` |
-| `MICKE_GVX_CACHE` | `~/.cache/micke/gvx` | EROFS layer cache passed to every `rungv` call |
+| `MICKE_GVX_CACHE` | `$XDG_CACHE_HOME/micke/gvx` (`~/.cache/micke/gvx`) | EROFS layer cache (`-cache-dir` on `rungv` image/run calls) |
 | `MICKE_RUNGV` | `rungv` | rungv binary path |
-| `MICKE_STATE_DIR` | `~/.local/state/micke` | Pidfiles + logs + instance lock |
+| `MICKE_STATE_DIR` | `$XDG_STATE_HOME/micke` (`~/.local/state/micke`) | Pidfiles + logs + instance lock |
 | `MICKE_SESSION_MEMORY` | `2g` | Per-sandbox `rungv -m` guard |
 | `MICKE_BOOT_TIMEOUT_MS` | `30000` | Wait for the driver's `micke: desktop ready` line |
 | `MICKE_MIN_FREE_MB` | `1024` | Free-RAM floor for `session_create` (0 disables) |
+| `MICKE_VNC_PASSWORD` | unset | Optional classic-VNC password passed into the sandbox |
 
 ## Connecting an MCP client
 
@@ -158,7 +161,7 @@ Adjust the port if you set `MICKE_PORT`.)
 ## Building the image (maintainers only)
 
 Users never build images. CI builds and pushes
-`ghcr.io/gosuda/micke` on every `image/**` change
+`ghcr.io/gosuda/micke` on every `image/**` change to `main`
 (`.github/workflows/image.yml`) for `linux/amd64` and `linux/arm64` on native
 GitHub runners (no QEMU); that is the distribution leg. For local
 development, Docker can still be used as the **build tool**:
