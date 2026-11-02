@@ -12,7 +12,7 @@
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureImage, sh, spawnDaemon, type Daemon } from "./helpers.js";
@@ -37,6 +37,16 @@ async function callErr(name: string, args: Record<string, unknown>): Promise<{ c
 
 function pidfile(id: string): string {
   return join(stateDir, "sessions", `${id}.json`);
+}
+
+/**
+ * A /workspace write must succeed with rc=0; when it does not, stderr must
+ * carry the reason ("Permission denied", ...). Otherwise the host read below
+ * fails as an unrelated ENOENT and hides the real cause.
+ */
+function expectWriteOk(r: { rc: number; stderr: string }): void {
+  if (r.rc !== 0) expect(r.stderr.trim()).not.toBe("");
+  expect(r.rc).toBe(0);
 }
 
 beforeAll(async () => {
@@ -178,22 +188,30 @@ test(
     // so artifacts are retrievable without a base64 round-trip.
     expect(a.workspace).toBeTruthy();
     expect(existsSync(a.workspace)).toBe(true);
-    await call("session_shell", {
+    const defaultWrite = await call("session_shell", {
       session_id: a.session_id,
       command: "echo default-workspace > /workspace/default.txt",
     });
+    // The write itself must succeed: a later ENOENT on the host read would
+    // otherwise blame the mount for what is really a guest permission error.
+    expectWriteOk(defaultWrite);
     expect(readFileSync(join(a.workspace, "default.txt"), "utf8")).toBe("default-workspace\n");
     console.log(`default workspace -> host read from ${a.workspace}/default.txt`);
 
     const ws = mkdtempSync(join(tmpdir(), "micke-ws-"));
+    // Explicit workspaces are checked, not rewritten: the guest (uid 1000)
+    // must be able to write, and mkdtemp's 0700 owner-only mode is invisible
+    // to it across the uid-unmapped mount. This chmod is part of the contract.
+    chmodSync(ws, 0o777);
     const b = await call("session_create", { workspace: ws });
     created.push(b.session_id);
     expect(b.status).toBe("ready");
     expect(b.novnc_url).not.toBe(a.novnc_url);
-    await call("session_shell", {
+    const explicitWrite = await call("session_shell", {
       session_id: b.session_id,
       command: "echo hello-from-sandbox > /workspace/phase1.txt",
     });
+    expectWriteOk(explicitWrite);
     const hostFile = readFileSync(join(ws, "phase1.txt"), "utf8");
     console.log(`workspace bind -> host read "${hostFile.trim()}" from ${ws}/phase1.txt`);
     expect(hostFile).toBe("hello-from-sandbox\n");
@@ -219,6 +237,14 @@ test(
     expect((await callErr("session_shell", { session_id: "deadbeef", command: "x" })).code).toBe("SESSION_NOT_FOUND");
     expect((await callErr("session_create", { workspace: "/nonexistent/xyz" })).code).toBe("WORKSPACE_INVALID");
     expect((await callErr("session_create", { workspace: "relative/path" })).code).toBe("WORKSPACE_INVALID");
+    // A user-supplied workspace the guest cannot write is rejected up front,
+    // with the chmod remedy — not left to fail on the first /workspace write.
+    // 0555 fails for the owner too, so this holds regardless of host uid.
+    const ro = mkdtempSync(join(tmpdir(), "micke-ro-ws-"));
+    chmodSync(ro, 0o555);
+    expect((await callErr("session_create", { workspace: ro })).code).toBe("WORKSPACE_NOT_WRITABLE");
+    chmodSync(ro, 0o755);
+    rmSync(ro, { recursive: true, force: true });
 
     // --- 12. teardown of remaining session ------------------------------------
     const tCloseB = Date.now();

@@ -8,12 +8,13 @@
 //
 // Every failure surfaces as MickeError with one JSON shape: {code, message, hint}.
 
-import { existsSync, mkdirSync, readFileSync, openSync, readSync, statSync, writeSync, closeSync, ftruncateSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, openSync, readSync, statSync, writeSync, closeSync, ftruncateSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { dlopen } from "bun:ffi";
 import * as io from "./gvxio.js";
 import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from "./shell.js";
+import { guestCanWrite, guestIds } from "./workspace.js";
 
 // flock(2) via FFI: the kernel releases the lock when this process dies, so a
 // crashed supervisor never leaves a stale lock behind (no pid-file recovery).
@@ -101,6 +102,22 @@ export class Supervisor {
       if (!isAbsolute(workspace) || !existsSync(workspace)) {
         throw new MickeError("WORKSPACE_INVALID", `workspace "${workspace}" must be an absolute host path that exists`, `It is mounted at /workspace (-v ${workspace}:/workspace).`);
       }
+      // gvx mounts without uid remapping: the guest writes as uid 1000, so the
+      // HOST mode decides whether /workspace is writable. Fail here, with the
+      // remedy, instead of letting the first write fail later with a bare
+      // "Permission denied" that looks like a broken mount.
+      const st = statSync(workspace);
+      if (!st.isDirectory()) {
+        throw new MickeError("WORKSPACE_INVALID", `workspace "${workspace}" is not a directory`, "It is mounted at /workspace, so it must be a directory.");
+      }
+      const { uid, gid } = guestIds();
+      if (!guestCanWrite(st, uid, gid)) {
+        throw new MickeError(
+          "WORKSPACE_NOT_WRITABLE",
+          `workspace "${workspace}" is not writable by the guest (uid ${uid}, gid ${gid}); /workspace would be read-only in the sandbox`,
+          `Run \`chmod -R a+w ${workspace}\` (or pass a directory the guest can write). gvx mounts without uid remapping; micke only chmods the workspace it creates itself.`,
+        );
+      }
     }
     this.checkMemoryFloor();
     if (!(await io.rungvAvailable())) {
@@ -122,6 +139,11 @@ export class Supervisor {
     if (workspace === null) {
       workspace = join(this.stateDir, "workspaces", id);
       mkdirSync(workspace, { recursive: true });
+      // Documented, disposable exception: rungv has no uid mapping, so a
+      // 0755 dir owned by the host uid is read-only for the uid-1000 guest.
+      // This directory is ours, holds no user data, and is the one place we
+      // may widen permissions; user-supplied workspaces are only checked.
+      chmodSync(workspace, 0o777);
     }
     // The child's stdout/stderr go to a REAL FILE, not a pipe: rungv outlives a
     // crashed daemon, and a pipe whose reader died would make the guest's next

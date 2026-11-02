@@ -109,20 +109,27 @@ and the daemon serves a static, no-JS session table at
 `http://127.0.0.1:7800/` (auto-refreshing; guards: instance lock, free-RAM
 floor, serialized image pulls).
 
-A host workspace is **always** mounted at `/workspace`: pass an absolute path
-to `session_create`, or omit it and micke creates
+A host workspace is **always** mounted at `/workspace`: pass an absolute
+directory to `session_create`, or omit it and micke creates
 `$MICKE_STATE_DIR/workspaces/<session_id>` and reports it as `workspace`.
-Artifacts (screenshots, downloads, dumps) written there are already on the
-host — no base64 through the shell channel. Files are kept after
-`session_close`; delete the directory when you are done with it.
+gvx has no uid mapping, so an explicit workspace must be writable by the guest
+(uid 1000); otherwise `session_create` fails fast with
+`WORKSPACE_NOT_WRITABLE` and the exact `chmod -R a+w <path>` remedy. The
+auto-created workspace is `chmod 0777` for that reason. Artifacts (downloads,
+dumps, the occasional screenshot) written there are already on the host — no
+base64 through the shell channel. Files are kept after `session_close`; delete
+the directory when you are done with it.
 
-Two additions make the shell agent-friendly:
+Three additions make the shell agent-friendly:
 
 - `agent-desktop` exits **non-zero** when its JSON envelope says `ok:false`
   (shimmed in the image), so `set -e` and `&&` are trustworthy.
 - `micke-page-text <url>` reads a page as small JSON (`{title,text,links}`)
   via headless chromium. Use it for content; use the AT-SPI tree for
   interaction — heavy pages time out the tree.
+- `micke-state` answers "is chromium alive / did the click land?" as ONE line
+  of JSON (`{alive,title,url,refs}`) from the a11y tree, in about two seconds
+  and without writing a file — verify with that instead of a screenshot.
 
 See [docs/server-internals.md](docs/server-internals.md) for configuration,
 the shell-channel protocol, adoption semantics, and the integration tests
@@ -145,6 +152,8 @@ the shell-channel protocol, adoption semantics, and the integration tests
 | `MICKE_SESSION_MEMORY` | `2g` | Per-sandbox `rungv -m` guard |
 | `MICKE_BOOT_TIMEOUT_MS` | `30000` | Wait for the driver's `micke: desktop ready` line |
 | `MICKE_MIN_FREE_MB` | `1024` | Free-RAM floor for `session_create` (0 disables) |
+| `MICKE_GUEST_UID` | `1000` | Guest uid used for the `/workspace` writability check |
+| `MICKE_GUEST_GID` | `1000` | Guest gid used for the `/workspace` writability check |
 | `MICKE_VNC_PASSWORD` | unset | Optional classic-VNC password passed into the sandbox |
 
 ## Connecting an MCP client

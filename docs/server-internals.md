@@ -24,6 +24,8 @@ Environment:
 | `MICKE_SESSION_MEMORY`     | `2g`                             | Per-sandbox `rungv -m` guard               |
 | `MICKE_BOOT_TIMEOUT_MS`    | `30000`                          | Wait for the driver's `micke: desktop ready` line |
 | `MICKE_MIN_FREE_MB`        | `1024`                           | Free-RAM floor: refuse `session_create` when `MemAvailable` is below this many MiB (0 disables) |
+| `MICKE_GUEST_UID`          | `1000`                           | Guest uid used for the `/workspace` writability check |
+| `MICKE_GUEST_GID`          | `1000`                           | Guest gid used for the `/workspace` writability check |
 | `MICKE_PORT`               | `7800`                           | Daemon port on 127.0.0.1 — MCP + dashboard (`0` = kernel-picked) |
 | `MICKE_VNC_PASSWORD`       | unset                            | Optional classic-VNC password passed into the sandbox |
 
@@ -59,11 +61,14 @@ supervisors would corrupt.
 
 ## Guards on create
 
-`session_create` validates cheaply first (screen, workspace, RAM floor, rungv
-binary), then runs the whole pull+boot phase under one in-process mutex:
-**never two pulls, never a pull beside a live session** (missing image + live
-session → `IMAGE_MISSING`), and concurrent creates of a missing image wait for
-one pull and then all proceed. A gvx pull compiles layers in memory,
+`session_create` validates cheaply first (screen, workspace existence and
+guest writability, RAM floor, rungv binary), then runs the whole pull+boot
+phase under one in-process mutex: **never two pulls, never a pull beside a live
+session** (missing image + live session → `IMAGE_MISSING`), and concurrent
+creates of a missing image wait for one pull and then all proceed. gvx has no
+uid mapping, so an explicit workspace whose mode the guest (uid 1000) cannot
+write is rejected with `WORKSPACE_NOT_WRITABLE` and a `chmod -R a+w` hint; the
+auto-created workspace is chmod 0777. A gvx pull compiles layers in memory,
 so this lock is the OOM-avoidance mechanism, not merely hygiene. The free-RAM
 floor reads `MemAvailable` from `/proc/meminfo` (non-Linux hosts fail open) and refuses with
 `INSUFFICIENT_MEMORY` below `MICKE_MIN_FREE_MB`.

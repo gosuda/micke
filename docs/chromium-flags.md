@@ -101,8 +101,8 @@ rungv run -cache-dir ~/.cache/micke/gvx -pull=never -m 2g -p 7801 -p 6080 ghcr.i
 ## The driving loop (cheatsheet)
 
 One full verified loop over `https://example.com` — launch → wait for a window
-→ snapshot → click a `@ref` → re-snapshot → screenshot. All of it goes through
-the ONE persistent shell (`session_shell`), where the env is already sourced.
+→ snapshot → click a `@ref` → re-snapshot. All of it goes through the ONE
+persistent shell (`session_shell`), where the env is already sourced.
 
 ```bash
 # 1. launch (verified receipt: ok=true, window.accessible=true; title settles
@@ -123,23 +123,23 @@ agent-desktop snapshot --app chromium -i --compact
 # 4. act on the ref — the ref embeds the snapshot id (verified: ok=true)
 agent-desktop click "@s26re9dx64r3s5:e65"
 
-# 5. re-snapshot and/or wait to verify the effect (verified after the click:
-#    new snapshot_id, ref_count 177; wait --window "Example Domains" -> found=true)
-agent-desktop snapshot --app chromium -i --compact
+# 5. verify from receipts, not pixels (verified after the click: new
+#    snapshot_id, ref_count 177; wait --window "Example Domains" -> found=true)
+micke-state   # {"alive":true,"title":"Example Domains","url":"iana.org","refs":177}
 agent-desktop wait --window "Example Domains" --app chromium --timeout 15000
-
-# 6. evidence out: `agent-desktop screenshot` returns a base64 PNG in the JSON
-#    envelope (`data.data`) (verified: 1280x800 png, 136,940 base64 chars ->
-#    102,705 bytes); give it a PATH and it writes the file instead — /workspace
-#    is ALWAYS a host bind (auto-created when session_create gets no
-#    workspace), so the png lands straight on the HOST, no base64 dance.
-agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
+agent-desktop snapshot --app chromium -i --compact
 ```
+
+There is deliberately no screenshot step: see "Screenshots: only when a human
+consumes them" below.
 
 Habits that keep the loop honest:
 
 - **Assert on receipts, not pixels**: `ok`, `ref_count`, `window.title`,
   `found` from the JSON above — screenshots are evidence, not assertions.
+  `micke-state` packages the three cheap ones (`alive`, `title`, `url`,
+  `refs`) into ONE line of JSON, about two seconds, writing no files; use it
+  for "is the browser alive" and "did the click land".
 - **Refs are snapshot-scoped**: the `@<snapshot>:<ref>` form only resolves
   against the snapshot it came from; after any action, re-snapshot before the
   next `click`/`type`.
@@ -153,6 +153,38 @@ Habits that keep the loop honest:
 - A human can watch the same desktop, or take over while the agent is paused,
   via the session's noVNC URL — see
   [manual-intervention.md](manual-intervention.md).
+
+## Screenshots: only when a human consumes them
+
+Ask first: **who reads this PNG?** If the answer is "me, to check the click
+worked", don't take it. `screenshot` succeeds even when the click did nothing,
+nothing in the agent loop consumes the file, and a 100 KB image says less than
+one line of state. Take a screenshot only when a human needs to see the
+pixels: they asked for one, you are reporting a visual defect (layout, color,
+a font rendering as tofu), or the answer exists only in the image.
+
+Verify actions without pixels instead:
+
+| question | assertion |
+| :-- | :-- |
+| is chromium alive? | `micke-state` → `alive:true` (exit 0) |
+| did the click navigate? | `micke-state` → changed `title`/`url`; `wait --window` → `found:true` |
+| did the page change? | `micke-state` → `refs` moved, or a fresh `snapshot` has a new `snapshot_id`/`ref_count` |
+| is the element there? | `snapshot` / `find` → the `@ref` exists |
+
+```bash
+micke-state   # {"alive":true,"title":"Npay 증권","url":"stock.naver.com","refs":547}
+```
+
+When a human does need the file, write it to `/workspace` so it lands on the
+host (see "Workspaces are always mounted"):
+
+```bash
+agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
+```
+
+Screenshots are evidence, not assertions — keep any assertion in the receipt,
+not in the image.
 
 ## Dispositions: delivery ≠ outcome
 
@@ -252,13 +284,30 @@ does not say *which* failure.
 ## Workspaces are always mounted
 
 `session_create` without `workspace` still gets a host directory: micke creates
-one under `<MICKE_STATE_DIR>/workspaces/<session_id>` and reports it as
-`workspace` in the receipt. Everything written to `/workspace` in the guest
-lands there on the host, so screenshots and dumps need no base64 round-trip:
+one under `<MICKE_STATE_DIR>/workspaces/<session_id>`, `chmod 0777`s it (the
+documented exception — see below), and reports it as `workspace` in the
+receipt. Everything written to `/workspace` in the guest lands there on the
+host, so screenshots and dumps need no base64 round-trip:
 
 ```bash
 agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
 ```
+
+**Explicit workspaces are checked, not rewritten.** gvx/rungv bind-mounts the
+host directory with no uid mapping: the guest writes as uid 1000 while the
+directory is owned by the host user. A default `0755` directory is readable
+but **not writable** in the guest, so micke rejects it up front:
+
+```
+{"code":"WORKSPACE_NOT_WRITABLE",
+ "message":"workspace \"…\" is not writable by the guest (uid 1000, gid 1000); …",
+ "hint":"Run `chmod -R a+w …` (or pass a directory the guest can write). …"}
+```
+
+Fix it with exactly that `chmod -R a+w <path>` (or pass a directory the guest
+can write). micke never widens permissions on a directory it did not create.
+`MICKE_GUEST_UID`/`MICKE_GUEST_GID` (default `1000:1000`) change the identity
+used for the check if you run a custom image.
 
 Workspace files are kept after `session_close` (they are the evidence trail);
 delete the directory when you no longer need it.

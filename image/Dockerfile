@@ -52,6 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         fonts-dejavu-core \
         fonts-liberation \
+        # CJK pages (Korean/Japanese/Chinese) render as tofu boxes with only
+        # the Latin fonts above; Noto CJK is Debian's package for them.
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Install under its own prefix: the real CLI keeps its npm symlinks and the
@@ -87,6 +90,11 @@ RUN chmod 0755 /usr/local/bin/agent-desktop
 COPY image/page-text.sh /usr/local/bin/micke-page-text
 COPY image/page_text.py /usr/local/lib/micke/page_text.py
 RUN chmod 0755 /usr/local/bin/micke-page-text && chmod 0644 /usr/local/lib/micke/page_text.py
+
+# Cheap verification channel: one line of JSON (alive/title/url/refs) from the
+# a11y tree, so "did the click land?" never has to cost a screenshot.
+COPY image/micke-state.sh /usr/local/bin/micke-state
+RUN chmod 0755 /usr/local/bin/micke-state
 
 USER $USERNAME
 WORKDIR /home/$USERNAME
