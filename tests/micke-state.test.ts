@@ -17,7 +17,13 @@ let bin: string;
 const WINDOW = `{"version":"2.5","ok":true,"command":"list-windows","data":[{"title":"Npay 증권 - Chromium"}]}`;
 const SNAPSHOT = `{"version":"2.5","ok":true,"data":{"ref_count":547,"tree":{"name":"Npay 증권 - Chromium","children":[{"name":"Address and search bar","role":"textfield","value":"stock.naver.com"}]}}}`;
 
-function run(opts: { windows?: string; windowsRc?: number; snapshot?: string; snapshotRc?: number }): {
+function run(opts: {
+  windows?: string;
+  windowsRc?: number;
+  snapshot?: string;
+  snapshotRc?: number;
+  chromiumProcess?: boolean;
+}): {
   rc: number;
   stdout: string;
   stderr: string;
@@ -38,6 +44,16 @@ esac
   );
   chmodSync(stub, 0o755);
 
+  // `pgrep -x chromium` is how the script tells "dead" from "alive, no window".
+  const pgrep = join(bin, "pgrep");
+  writeFileSync(
+    pgrep,
+    `#!/bin/sh
+exit \${MICKE_STUB_PGREP_RC:-1}
+`,
+  );
+  chmodSync(pgrep, 0o755);
+
   const proc = Bun.spawnSync(["sh", STATE], {
     cwd: bin,
     env: {
@@ -47,13 +63,14 @@ esac
       MICKE_STUB_SNAPSHOT: join(bin, "snapshot.json"),
       MICKE_STUB_WINDOWS_RC: String(opts.windowsRc ?? 0),
       MICKE_STUB_SNAPSHOT_RC: String(opts.snapshotRc ?? 0),
+      MICKE_STUB_PGREP_RC: opts.chromiumProcess === false ? "1" : "0",
     },
   });
   return {
     rc: proc.exitCode ?? 1,
     stdout: proc.stdout.toString(),
     stderr: proc.stderr.toString(),
-    files: readdirSync(bin).filter((f) => !["agent-desktop", "windows.json", "snapshot.json"].includes(f)),
+    files: readdirSync(bin).filter((f) => !["agent-desktop", "pgrep", "windows.json", "snapshot.json"].includes(f)),
   };
 }
 
@@ -92,10 +109,27 @@ describe("micke-state", () => {
     expect(r.stderr.trim()).not.toBe("");
   });
 
-  test("a failed list-windows (ok:false -> shim exit 1) is also not alive", () => {
-    const r = run({ windows: `{"version":"2.5","ok":false,"error":{"code":"NO_APP"}}`, windowsRc: 1 });
+  test("a failed list-windows with no chromium process says it is not running", () => {
+    const r = run({
+      windows: `{"version":"2.5","ok":false,"error":{"code":"NO_APP"}}`,
+      windowsRc: 1,
+      chromiumProcess: false,
+    });
     expect(r.rc).toBe(1);
     expect(oneLine(r.stdout).alive).toBe(false);
+    expect(r.stderr).toContain("not running");
+    expect(r.stderr).toContain("pgrep found no chromium process");
+  });
+
+  test("a process alive with no window is reported differently from a dead one", () => {
+    const r = run({
+      windows: `{"version":"2.5","ok":false,"error":{"code":"NO_APP"}}`,
+      windowsRc: 1,
+      chromiumProcess: true,
+    });
+    expect(r.rc).toBe(1);
+    expect(oneLine(r.stdout).alive).toBe(false);
+    expect(r.stderr).toContain("running but exposes no window");
   });
 
   test("snapshot failure keeps the browser alive, url/refs null", () => {

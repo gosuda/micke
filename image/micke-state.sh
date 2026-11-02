@@ -26,11 +26,21 @@ emit_not_alive() {
     exit 1
 }
 
+# list-windows cannot tell "no process at all" from "process, no window yet";
+# pgrep -x can (8–23 ms measured). Same stdout contract either way.
+no_window() {
+    if pgrep -x chromium >/dev/null 2>&1; then
+        emit_not_alive "chromium is running but exposes no window ($1)"
+    else
+        emit_not_alive "chromium is not running ($1; pgrep found no chromium process)"
+    fi
+}
+
 # One cheap call answers "is there a chromium window?" and gives the title.
 wins=$(agent-desktop list-windows --app chromium 2>/dev/null) \
-    || emit_not_alive "chromium is not running (list-windows failed)"
+    || no_window "list-windows failed"
 printf '%s' "$wins" | jq -e '(.data // []) | length > 0' >/dev/null 2>&1 \
-    || emit_not_alive "chromium is running but exposes no window"
+    || no_window "list-windows reported no window"
 
 title=$(printf '%s' "$wins" | jq -r '(.data // []) | map(select(.title != null and .title != "")) | .[0].title // empty' 2>/dev/null) || title=""
 # Window titles end in " - Chromium"; the app name is noise in a one-liner.

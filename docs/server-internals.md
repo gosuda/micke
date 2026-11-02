@@ -150,7 +150,9 @@ and prints `rungv: publishing 127.0.0.1:<host> -> <guest>/tcp`; the supervisor
 polls the session log for those lines and persists them in the pidfile. It then
 waits for the driver's `micke: desktop ready` line. That line is emitted only
 after `/tmp/session.env` exists and the shell listener is dialable; noVNC is
-probed and reported up/down, but does not gate readiness.
+probed and reported up/down, but does not gate readiness. `ready` means the
+desktop is up (Xvfb, openbox, AT-SPI, shell listener) — **not** that chromium
+is running; `status` is sandbox liveness, not browser liveness.
 
 `/dev/shm`: gvx defaults it to half of host RAM (large enough for chromium);
 `rungv` (v0.4.x) refuses explicit tmpfs mounts at or below `/dev`, so micke

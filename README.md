@@ -120,7 +120,7 @@ dumps, the occasional screenshot) written there are already on the host — no
 base64 through the shell channel. Files are kept after `session_close`; delete
 the directory when you are done with it.
 
-Four additions make the shell agent-friendly:
+Five additions make the shell agent-friendly:
 
 - `agent-desktop` exits **non-zero** when its JSON envelope says `ok:false`
   (shimmed in the image), so `set -e` and `&&` are trustworthy.
@@ -131,6 +131,12 @@ Four additions make the shell agent-friendly:
 - `micke-state` answers "is chromium alive / did the click land?" as ONE line
   of JSON (`{alive,title,url,refs}`) from the a11y tree, in about two seconds
   and without writing a file — verify with that instead of a screenshot.
+  Exit 1 = no browser; `ready` describes the sandbox, not the browser;
+  `screenshot` still succeeds after a browser death.
+- `micke-key <combo>` delivers one key combo to the chromium window (`xdotool
+  key --clearmodifiers`, after activating it) and prints one line of JSON.
+  Use it instead of `agent-desktop press`, which can SIGSEGV chromium on this
+  image; it proves delivery, not effect — verify with `micke-state`.
 - `micke-find <substring> [--role <role>]` finds a clickable `@ref` on a
   heavy page with one filtered snapshot (occasionally two or three) and prints
   `ref<TAB>role<TAB>name`, ready for `click`. Prefer it to

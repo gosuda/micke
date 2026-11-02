@@ -153,6 +153,9 @@ Habits that keep the loop honest:
 - A human can watch the same desktop, or take over while the agent is paused,
   via the session's noVNC URL — see
   [manual-intervention.md](manual-intervention.md).
+- **Check liveness before asserting**: `micke-state` exits 1 when the browser
+  is gone; `list-apps`, `list-windows` and `screenshot` will happily keep
+  answering `ok` on a dead desktop.
 
 ## Screenshots: only when a human consumes them
 
@@ -185,6 +188,45 @@ agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.
 
 Screenshots are evidence, not assertions — keep any assertion in the receipt,
 not in the image.
+
+## A dead browser is silent — and `agent-desktop press` kills it
+
+A browser death is invisible to almost every surface. Measured on this image
+(2026-11-03, agent-desktop v1.0.2):
+
+| surface | after the browser is gone |
+| :-- | :-- |
+| `list-apps`, bare `list-windows` | `ok:true` with an empty `[]` (`--app chromium` is the one form that errors, `APP_NOT_FOUND`) |
+| `agent-desktop status` | `ok:true` — the desktop is up, the browser is not |
+| `screenshot` | `ok:true`, a valid 1280x800 PNG of the empty desktop |
+| `session_list` | still `status:"ready"` (sandbox liveness, not browser liveness) |
+| `micke-state` | exit 1, `{"alive":false,...}` — the one honest signal |
+
+Cheapest correct probes: `pgrep -x chromium` (8–23 ms measured), `xdotool
+search --name Chromium` (23–38 ms), or `micke-state` (2.0–2.3 s alive, ~22 ms
+dead — and it also answers "did it land").
+
+**`press` is the crash.** `agent-desktop press` SIGSEGVs chromium here. Under
+`--force-renderer-accessibility`, 25 of 29 delivered presses killed the
+process (`rc 139`) — `ctrl+r`, `F5`, `ctrl+w`, `ctrl+shift+q`, and even a bare
+`a`. The receipt still said `ok:true`, `delivered_unverified`. `xdotool key
+--clearmodifiers <combo>` is the safe path: 0 crashes in 20+ attempts,
+including 3 `ctrl+r` reloads of naver.com. The X events are byte-identical
+(`xev`: `synthetic NO`, same keycode/state); the difference is that `press`
+goes through the AT-SPI `DeviceEventController.NotifyListenersSync` path, two
+calls ~40 ms before the browser's D-Bus name disappears. Dropping the a11y
+flag would "fix" it and destroy the refs, so use `micke-key <combo>`: it
+resolves and activates the chromium window, then sends the combo with
+xdotool. xdotool has no receipt — that is delivery, not effect; verify with
+`micke-state`. `agent-desktop click` is unaffected.
+
+**Why it died.** A dead chromium leaves no artifact: `launch` detaches it with
+stdin/stdout/stderr all on `/dev/null` and it is re-parented to PID 1;
+crashpad cannot dump under gVisor (`ptrace: EINVAL`), and there is no core
+pattern. `micke-chromium` therefore adds `--enable-logging
+--arg=--log-file=/tmp/chromium.log`; that file survives the detach and is the
+only post-mortem. There is deliberately no restart/supervision: a crash must
+stay visible.
 
 ## Dispositions: delivery ≠ outcome
 

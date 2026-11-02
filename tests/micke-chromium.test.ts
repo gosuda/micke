@@ -75,6 +75,8 @@ describe("micke-chromium argument handling", () => {
       "chromium",
       "--arg=--no-sandbox",
       "--arg=--force-renderer-accessibility",
+      "--arg=--enable-logging",
+      "--arg=--log-file=/tmp/chromium.log",
       "--arg=https://example.com",
       "--arg=--load-extension=/tmp/x",
     ]);
@@ -88,6 +90,8 @@ describe("micke-chromium argument handling", () => {
       "chromium",
       "--arg=--no-sandbox",
       "--arg=--force-renderer-accessibility",
+      "--arg=--enable-logging",
+      "--arg=--log-file=/tmp/chromium.log",
     ]);
   });
 });

@@ -8,6 +8,12 @@
 # snapshots come back with no refs to click. Baking the flags in here makes
 # the correct launch the path of least resistance.
 #
+# Post-mortem: a dead chromium leaves no artifact — agent-desktop detaches it
+# with stdin/stdout/stderr all on /dev/null and it is re-parented to PID 1;
+# crashpad cannot dump under gVisor (ptrace: EINVAL) and there is no core
+# pattern. So the launch adds --enable-logging --log-file=/tmp/chromium.log:
+# that file survives the detach and is the only place to see why it died.
+#
 # Usage:
 #   micke-chromium                       # about:blank
 #   micke-chromium https://example.com   # ...at a URL
@@ -21,7 +27,7 @@
 set -eu
 
 usage() {
-    sed -n '11,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '17,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -40,5 +46,7 @@ esac
 exec agent-desktop launch chromium \
     --arg=--no-sandbox \
     --arg=--force-renderer-accessibility \
+    --arg=--enable-logging \
+    --arg=--log-file=/tmp/chromium.log \
     ${url:+"--arg=$url"} \
     "$@"
