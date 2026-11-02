@@ -17,18 +17,17 @@
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createServer } from "node:net";
 import { join } from "node:path";
+import { spawnDaemon, type Daemon } from "./helpers.js";
 
 const CYCLES = 20;
 const FD_TOLERANCE = 8;
 
 let client: Client;
+let daemon: Daemon;
 let stateDir: string;
-let serverPid: number | null = null;
 let baselineFds = 0;
 let baselineChildren = 0;
 
@@ -46,23 +45,12 @@ async function call<T = any>(name: string, args: Record<string, unknown> = {}): 
 }
 
 function fdCount(): number {
-  return readdirSync(`/proc/${serverPid}/fd`).length;
+  return readdirSync(`/proc/${daemon.proc.pid}/fd`).length;
 }
 
 async function childCount(): Promise<number> {
-  const r = await sh(["pgrep", "-P", String(serverPid)]);
+  const r = await sh(["pgrep", "-P", String(daemon.proc.pid)]);
   return r.rc === 0 ? r.stdout.trim().split("\n").filter(Boolean).length : 0;
-}
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.listen(0, "127.0.0.1", () => {
-      const port = (s.address() as { port: number }).port;
-      s.close(() => resolve(port));
-    });
-    s.on("error", reject);
-  });
 }
 
 async function oneCycle(tag: string): Promise<number> {
@@ -83,15 +71,9 @@ beforeAll(async () => {
     expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
   }
   stateDir = mkdtempSync(join(tmpdir(), "micke-leak-"));
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [join(import.meta.dir, "..", "src", "main.ts")],
-    cwd: join(import.meta.dir, ".."),
-    env: { ...process.env, MICKE_STATE_DIR: stateDir, MICKE_DASHBOARD_PORT: String(await freePort()) } as Record<string, string>,
-  });
-  client = new Client({ name: "micke-leak-test", version: "0.1.0" });
-  await client.connect(transport);
-  serverPid = transport.pid;
+  daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
+  client = await daemon.connect("micke-leak-test");
+  const serverPid = daemon.proc.pid;
   // One warm-up cycle (out of the measurements) lets Bun settle internals,
   // so the baseline is a steady idle state.
   const warmMs = await oneCycle("warmup");
@@ -103,6 +85,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client.close().catch(() => {});
+  await daemon.terminate().catch(() => {});
   rmSync(stateDir, { recursive: true, force: true });
 }, 60_000);
 

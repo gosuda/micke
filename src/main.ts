@@ -1,17 +1,19 @@
-// main — micke supervisor + MCP server (stdio transport), one process.
+// main — micke daemon: supervisor + MCP over Streamable HTTP + dashboard,
+// ONE Bun.serve on 127.0.0.1:$MICKE_PORT (default 7800; loopback-only bind is
+// a security property, FR-23).
 //
 // Run: bun run src/main.ts  (or: bun run start)
-// Stdout belongs to the MCP protocol; diagnostics go to stderr.
+// Routes: POST /mcp (stateless MCP), GET / (dashboard), anything else 404.
+// Diagnostics go to stderr; stdout stays clean.
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { MickeError, Supervisor } from "./supervisor.js";
-import { startDashboard } from "./dashboard.js";
-import { registerTools } from "./mcp.js";
+import { dashboardResponse } from "./dashboard.js";
+import { createMcpServer } from "./mcp.js";
 
 const sup = new Supervisor();
 try {
-  await sup.start();
+  await sup.start(); // flock FIRST, then bind: a second micke with a different state dir loses the port race, not the lock
 } catch (err) {
   // e.g. LOCK_HELD from a second supervisor instance: exit promptly, structured.
   const e = err instanceof MickeError
@@ -21,26 +23,74 @@ try {
   process.exit(1);
 }
 
-const dashboard = startDashboard(() => sup.listSessions());
-if (dashboard.port > 0) console.error(`micke: dashboard at http://127.0.0.1:${dashboard.port}/`);
+const port = parseInt(process.env.MICKE_PORT || "7800", 10);
 
-const server = new Server({ name: "micke", version: "0.1.0" }, { capabilities: { tools: {} } });
-registerTools(server, sup);
-await server.connect(new StdioServerTransport());
-console.error(`micke: supervisor ready (${(await sup.listSessions()).length} session(s) known)`);
+// The allowlist must use the BOUND port: with MICKE_PORT=0 the daemon listens
+// on a kernel-picked port, and a same-origin browser fetch sends that one.
+let boundPort = port;
+
+// The router IS the middleware (design §2d): the loopback bind plus this
+// Origin check are the whole DNS-rebinding defense. Browsers always send
+// Origin on cross-origin POSTs; MCP clients send none.
+function originAllowed(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  return origin === null
+    || origin === `http://127.0.0.1:${boundPort}`
+    || origin === `http://localhost:${boundPort}`;
+}
+
+async function route(req: Request): Promise<Response> {
+  if (!originAllowed(req)) return new Response("forbidden\n", { status: 403 });
+  const path = new URL(req.url).pathname;
+  if (path === "/mcp") {
+    if (req.method !== "POST") {
+      // Stateless mode has no server-push stream; 405 is spec-blessed
+      // (clients treat it as expected). Never delegate GET to the
+      // transport — it would open a hanging SSE stream.
+      return new Response("method not allowed\n", { status: 405, headers: { Allow: "POST" } });
+    }
+    // CRITICAL: a stateless transport is single-use (the SDK throws on
+    // reuse) and a Server cannot reconnect — fresh pair per request.
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless: sessions live in the Supervisor
+      enableJsonResponse: true, // tools-only server; no SSE needed
+    });
+    const mcp = createMcpServer(sup);
+    await mcp.connect(transport);
+    return transport.handleRequest(req);
+  }
+  if (path === "/") return dashboardResponse(() => sup.listSessions());
+  return new Response("not found\n", { status: 404 });
+}
+
+const server = (() => {
+  try {
+    // reusePort: false is load-bearing: Bun's Linux default (true, via
+    // SO_REUSEPORT) would let a second daemon "bind" the same port and
+    // silently share traffic with the first — PORT_HELD must be detectable.
+    return Bun.serve({ hostname: "127.0.0.1", port, reusePort: false, development: false, fetch: route });
+  } catch (err) {
+    // The port IS the product (unlike the old optional dashboard): fatal.
+    console.error(`micke: fatal: ${JSON.stringify({
+      code: "PORT_HELD",
+      message: `cannot bind 127.0.0.1:${port}: ${err instanceof Error ? err.message : String(err)}`,
+      hint: `Another process holds the port. Check: ss -ltnp 'sport = :${port}' — or set MICKE_PORT.`,
+    })}`);
+    process.exit(1);
+  }
+})();
+boundPort = server.port ?? port; // kernel-picked when MICKE_PORT=0
+
+console.error(`micke: daemon at http://127.0.0.1:${boundPort}/ (mcp: POST /mcp)`);
 
 let closing = false;
 async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
   console.error(`micke: ${signal}, killing shell channels (containers stay; they become orphaned)`);
-  dashboard.stop();
+  server.stop(true);
   await sup.shutdown();
   process.exit(0);
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
-// Die with the MCP client: without this, the dashboard's listener would keep
-// the process (and the instance lock) alive forever after stdin EOF.
-process.stdin.on("end", () => void shutdown("stdin closed"));
-process.stdin.on("close", () => void shutdown("stdin closed"));

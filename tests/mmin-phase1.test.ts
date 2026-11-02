@@ -1,21 +1,22 @@
 // tests/mmin-phase1.test.ts — M-min phase 1 end-to-end verification.
 //
-// On this host (Docker + local image only): starts the real MCP server as a
-// subprocess, talks MCP over stdio, and walks the core loop:
-// create -> noVNC URL (HTTP 200) -> shell (a11y granted, chromium, snapshot
-// refs, persistence, output cap, timeout-kill) -> workspace bind -> close ->
-// container/bash gone -> list reflects everything.
+// On this host (Docker + local image only): starts the real daemon as a
+// subprocess (kernel-picked port), talks MCP over Streamable HTTP, and walks
+// the core loop: create -> noVNC URL (HTTP 200) -> shell (a11y granted,
+// chromium, snapshot refs, persistence, output cap, timeout-kill) -> workspace
+// bind -> close -> container/bash gone -> list reflects everything.
 //
 // Run: bun test tests/mmin-phase1.test.ts
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnDaemon, type Daemon } from "./helpers.js";
 
 let client: Client;
+let daemon: Daemon;
 let stateDir: string;
 const created: string[] = []; // session ids created by this run (cleanup safety)
 
@@ -46,19 +47,14 @@ beforeAll(async () => {
     expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
   }
   stateDir = mkdtempSync(join(tmpdir(), "micke-test-state-"));
-  const transport = new StdioClientTransport({
-    command: process.execPath, // bun
-    args: [join(import.meta.dir, "..", "src", "main.ts")],
-    cwd: join(import.meta.dir, ".."),
-    env: { ...process.env, MICKE_STATE_DIR: stateDir } as Record<string, string>,
-  });
-  client = new Client({ name: "micke-test", version: "0.1.0" });
-  await client.connect(transport);
+  daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
+  client = await daemon.connect("micke-test");
 }, 60_000);
 
 afterAll(async () => {
   for (const id of created) await client.callTool({ name: "session_close", arguments: { session_id: id } }).catch(() => {});
   await client.close().catch(() => {});
+  await daemon.terminate().catch(() => {});
   rmSync(stateDir, { recursive: true, force: true });
 }, 60_000);
 
@@ -214,20 +210,16 @@ test(
     expect(finalRows.length).toBe(0);
 
     // --- 13. orphan detection: container outliving the supervisor ------------
-    // Start a session, kill the SERVER process abruptly (simulated supervisor
-    // death), restart, and confirm it is listed as orphaned, then reaped.
+    // Start a session, kill the DAEMON (simulated supervisor death), restart,
+    // and confirm the container is listed as orphaned, then reaped. Orphans
+    // stay list/close-only for now — re-attach lands with the gvx runtime
+    // swap (docs/research/gvx-only-analysis.md §10).
     const c = await call("session_create");
     created.push(c.session_id);
     await client.close();
-    // restart
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [join(import.meta.dir, "..", "src", "main.ts")],
-      cwd: join(import.meta.dir, ".."),
-      env: { ...process.env, MICKE_STATE_DIR: stateDir } as Record<string, string>,
-    });
-    client = new Client({ name: "micke-test", version: "0.1.0" });
-    await client.connect(transport);
+    await daemon.kill(); // SIGKILL: the container stays, becoming an orphan
+    daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir }); // new ephemeral port
+    client = await daemon.connect("micke-test-restart");
     rows = (await call("session_list")).sessions;
     const orphan = rows.find((r: any) => r.session_id === c.session_id);
     console.log(`after supervisor restart -> session ${c.session_id} listed as ${orphan?.status}`);

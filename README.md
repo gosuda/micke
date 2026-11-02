@@ -91,20 +91,23 @@ Early stage. The project is under active prototyping.
 
 ## MCP server (M-min, phase 1)
 
-A supervisor + MCP server for the flow above lives in [`src/`](src/) (Bun +
-TypeScript; stdio transport; exactly four tools: `session_create`,
+A supervisor + MCP daemon for the flow above lives in [`src/`](src/) (Bun +
+TypeScript; MCP over Streamable HTTP; exactly four tools: `session_create`,
 `session_list`, `session_close`, `session_shell` — one persistent shell per
 session, which is how agents drive the desktop through `agent-desktop`).
 
 ```sh
 bun install
-bun start
+bun start   # daemon on http://127.0.0.1:7800/ (MCP + dashboard; MICKE_PORT to change)
 ```
 
-Every created session reports a `novnc_url` (host port chosen by Docker,
-loopback-only) for live view/intervention, and the supervisor serves a static,
-no-JS session table at `http://127.0.0.1:7800/` (auto-refreshing; guards:
-instance lock, free-RAM floor, serialized image pulls).
+The daemon must be running before any MCP client connects (it does not
+auto-restart — see [docs/systemd-micke.service](docs/systemd-micke.service)
+for a systemd user unit that restarts it). Every created session reports a
+`novnc_url` (host port chosen by Docker, loopback-only) for live
+view/intervention, and the daemon serves a static, no-JS session table at
+`http://127.0.0.1:7800/` (auto-refreshing; guards: instance lock, free-RAM
+floor, serialized image pulls).
 See [docs/server-internals.md](docs/server-internals.md) for configuration,
 the shell-channel protocol, and the integration tests (`bun test tests/`).
 
@@ -115,25 +118,24 @@ the shell-channel protocol, and the integration tests (`bun test tests/`).
 
 ## Connecting an MCP client
 
-Any MCP client that speaks stdio can use micke. For example, in OpenCode's
-config (`opencode.json`):
+Any MCP client that speaks Streamable HTTP can use micke. For example, in
+OpenCode's config (`opencode.json`):
 
 ```json
 {
   "mcp": {
     "servers": {
       "micke": {
-        "type": "local",
-        "command": ["bun", "run", "src/main.ts"],
-        "cwd": "<repo>"
+        "type": "remote",
+        "url": "http://127.0.0.1:7800/mcp"
       }
     }
   }
 }
 ```
 
-(`bun` must be on the client's PATH — or give its absolute path — and the
-`cwd` must point at this repo's root directory.)
+(The daemon binds loopback only; clients and the daemon must share the host.
+Adjust the port if you set `MICKE_PORT`.)
 
 ## License
 

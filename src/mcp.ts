@@ -95,6 +95,17 @@ function fail(err: unknown): CallToolResult {
   };
 }
 
+/**
+ * Fresh low-level Server wired with the four tools. The HTTP route builds one
+ * per request (stateless): a Server refuses reconnecting while a transport is
+ * attached, and per-request instances carry zero cross-request state.
+ */
+export function createMcpServer(sup: Supervisor): Server {
+  const server = new Server({ name: "micke", version: "0.1.0" }, { capabilities: { tools: {} } });
+  registerTools(server, sup);
+  return server;
+}
+
 export function registerTools(server: Server, sup: Supervisor): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 

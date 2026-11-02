@@ -7,18 +7,14 @@
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createServer } from "node:net";
 import { join } from "node:path";
-
-const MAIN = join(import.meta.dir, "..", "src", "main.ts");
-const SERVER_DIR = join(import.meta.dir, "..");
+import { spawnDaemon, type Daemon, MAIN, SERVER_DIR } from "./helpers.js";
 
 let client: Client;
+let daemon: Daemon;
 let stateDir: string;
-let dashPort: number;
 const created: string[] = [];
 
 async function sh(args: string[]): Promise<{ rc: number; stdout: string }> {
@@ -34,30 +30,6 @@ async function call<T = any>(name: string, args: Record<string, unknown> = {}): 
   return res.structuredContent ?? JSON.parse(text);
 }
 
-async function spawnServer(env: Record<string, string>): Promise<Client> {
-  const transport = new StdioClientTransport({
-    command: process.execPath, // bun
-    args: [MAIN],
-    cwd: SERVER_DIR,
-    env: { ...process.env, ...env } as Record<string, string>,
-  });
-  const c = new Client({ name: "micke-test-p2", version: "0.1.0" });
-  await c.connect(transport);
-  return c;
-}
-
-/** Ask the kernel for a free TCP port (bind :0, read it back, close). */
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.listen(0, "127.0.0.1", () => {
-      const port = (s.address() as { port: number }).port;
-      s.close(() => resolve(port));
-    });
-    s.on("error", reject);
-  });
-}
-
 beforeAll(async () => {
   const tags = await sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]);
   if (!tags.stdout.includes("micke:latest")) {
@@ -65,18 +37,19 @@ beforeAll(async () => {
     expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
   }
   stateDir = mkdtempSync(join(tmpdir(), "micke-test-p2-"));
-  dashPort = await freePort();
-  client = await spawnServer({ MICKE_STATE_DIR: stateDir, MICKE_DASHBOARD_PORT: String(dashPort) });
+  daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
+  client = await daemon.connect("micke-test-p2");
 }, 60_000);
 
 afterAll(async () => {
   for (const id of created) await client.callTool({ name: "session_close", arguments: { session_id: id } }).catch(() => {});
   await client.close().catch(() => {});
+  await daemon.terminate().catch(() => {});
   rmSync(stateDir, { recursive: true, force: true });
 }, 60_000);
 
 test("dashboard: empty table, meta refresh, localhost-only", async () => {
-  const res = await fetch(`http://127.0.0.1:${dashPort}/`);
+  const res = await fetch(`http://127.0.0.1:${daemon.port}/`);
   expect(res.status).toBe(200);
   expect(res.headers.get("content-type")).toContain("text/html");
   const body = await res.text();
@@ -84,12 +57,12 @@ test("dashboard: empty table, meta refresh, localhost-only", async () => {
   expect(body).toContain("no sessions");
   expect(body).not.toContain("<script"); // no-JS is a requirement (FR-23)
 
-  expect((await fetch(`http://127.0.0.1:${dashPort}/other`)).status).toBe(404);
+  expect((await fetch(`http://127.0.0.1:${daemon.port}/other`)).status).toBe(404);
 
   // localhost-only bind: a non-loopback interface must NOT reach it (FR-23).
   const ips = (await sh(["hostname", "-I"])).stdout.trim().split(/\s+/).filter((ip) => ip && ip !== "127.0.0.1");
   if (ips.length > 0) {
-    await expect(fetch(`http://${ips[0]}:${dashPort}/`)).rejects.toThrow();
+    await expect(fetch(`http://${ips[0]}:${daemon.port}/`)).rejects.toThrow();
     console.log(`dashboard bind -> refused on non-loopback ${ips[0]} (localhost-only ok)`);
   }
 }, 15_000);
@@ -100,7 +73,7 @@ test("dashboard: live session row (id/status/uptime/link) and the noVNC link ope
   created.push(a.session_id);
   expect(a.status).toBe("ready");
 
-  const body = await (await fetch(`http://127.0.0.1:${dashPort}/`)).text();
+  const body = await (await fetch(`http://127.0.0.1:${daemon.port}/`)).text();
   expect(body).toContain(a.session_id);
   expect(body).toContain(`>${a.status}<`);
   expect(body).toMatch(/\d+s/); // human uptime
@@ -112,7 +85,7 @@ test("dashboard: live session row (id/status/uptime/link) and the noVNC link ope
   expect(novnc.status).toBe(200);
 
   await call("session_close", { session_id: a.session_id });
-  const after = await (await fetch(`http://127.0.0.1:${dashPort}/`)).text();
+  const after = await (await fetch(`http://127.0.0.1:${daemon.port}/`)).text();
   expect(after).not.toContain(a.session_id);
   console.log("dashboard after close -> row gone");
 }, 60_000);
@@ -143,11 +116,11 @@ test("instance lock: a second supervisor exits promptly with LOCK_HELD", async (
 
 test("RAM floor: MICKE_MIN_FREE_MB above MemAvailable -> INSUFFICIENT_MEMORY", async () => {
   const stateDir2 = mkdtempSync(join(tmpdir(), "micke-test-p2-floor-"));
-  const client2 = await spawnServer({
+  const daemon2 = await spawnDaemon({
     MICKE_STATE_DIR: stateDir2,
-    MICKE_DASHBOARD_PORT: String(await freePort()),
     MICKE_MIN_FREE_MB: "99999999", // far above any host's MemAvailable
   });
+  const client2 = await daemon2.connect("micke-test-p2-floor");
   const err = await (async () => {
     const res: any = await client2.callTool({ name: "session_create", arguments: {} });
     expect(res.isError).toBe(true);
@@ -160,6 +133,7 @@ test("RAM floor: MICKE_MIN_FREE_MB above MemAvailable -> INSUFFICIENT_MEMORY", a
   const running = await sh(["docker", "ps", "-q", "--filter", "label=micke.session"]);
   expect(running.stdout.trim()).toBe("");
   await client2.close();
+  await daemon2.terminate();
   rmSync(stateDir2, { recursive: true, force: true });
 }, 60_000);
 

@@ -1,10 +1,10 @@
 # micke server internals (M-min)
 
-The supervisor + MCP server: one process, stdio transport, exactly four tools.
-Stack: Bun + TypeScript (no build step), single runtime dependency
-(`@modelcontextprotocol/sdk`); Docker is driven by shelling out to the `docker`
-CLI. The same process also serves the static session dashboard on
-127.0.0.1 (see below).
+The supervisor + MCP daemon: one process, exactly four tools, MCP over
+stateless Streamable HTTP. Stack: Bun + TypeScript (no build step), single
+runtime dependency (`@modelcontextprotocol/sdk`); Docker is driven by shelling
+out to the `docker` CLI. The same process serves the static session dashboard
+on the same loopback port (see below).
 
 For how to run it, see the root [README.md](../README.md).
 
@@ -19,7 +19,7 @@ Environment:
 | `MICKE_STATE_DIR`      | `~/.local/state/micke` | Persistent session registry + instance lock (XDG state) |
 | `MICKE_BOOT_TIMEOUT_MS`| `30000`            | Wait for the `micke: desktop ready` log    |
 | `MICKE_MIN_FREE_MB`    | `1024`             | Free-RAM floor: refuse `session_create` when `MemAvailable` is below this many MiB (0 disables) |
-| `MICKE_DASHBOARD_PORT` | `7800`             | Dashboard port on 127.0.0.1 (`0` = kernel-picked) |
+| `MICKE_PORT`           | `7800`             | Daemon port on 127.0.0.1 — MCP + dashboard (`0` = kernel-picked) |
 
 ## Instance lock (FR-19)
 
@@ -42,17 +42,44 @@ missing image wait for one pull and then all proceed (FR-31/32). The
 free-RAM floor reads `MemAvailable` from `/proc/meminfo` and refuses with
 `INSUFFICIENT_MEMORY` below `MICKE_MIN_FREE_MB`.
 
+## HTTP surface (transport)
+
+One `Bun.serve` on `127.0.0.1:$MICKE_PORT` (default 7800; `0` =
+kernel-picked), started AFTER the instance lock (flock first, then bind — a
+second micke with a different state dir loses the port race, not the lock):
+
+| Route | Method | Behavior |
+| :-- | :-- | :-- |
+| `/mcp` | POST | Stateless MCP: a **fresh** `WebStandardStreamableHTTPServerTransport` + fresh `Server` per request (the SDK forbids reusing a stateless transport; per-request instances carry zero cross-request state). JSON responses, no SSE — a tools-only server has no server-initiated messages. |
+| `/mcp` | other | `405` with `Allow: POST`. GET is never delegated to the transport (stateless mode has no SSE stream; a GET would hang open). Clients treat the 405 as expected. |
+| `/` | GET | The dashboard (below). |
+| other | any | `404 not found`. |
+
+Requests carrying an `Origin` header are answered `403` unless it is
+`http://127.0.0.1:<port>` or `http://localhost:<port>` — the loopback bind
+plus this check are the whole DNS-rebinding defense (browsers always send
+`Origin` on cross-origin POSTs; MCP clients send none). A bind failure is
+fatal: the port IS the product, so the daemon exits 1 with
+`{"code":"PORT_HELD", ...}` on stderr naming the port. Request bodies are
+capped at 4 MiB by the transport (answered 413); response bodies are not
+capped. Clients come and go freely — a disconnect is a dropped TCP
+connection; sessions live in the supervisor, keyed by micke session id, never
+by client. Startup prints one parseable stderr line:
+`micke: daemon at http://127.0.0.1:<port>/ (mcp: POST /mcp)`.
+
 ## Dashboard (FR-23/24/25/29)
 
-The supervisor serves ONE static route on `127.0.0.1:$MICKE_DASHBOARD_PORT`
-(default 7800): a no-JS HTML table — one row per session: id, status, uptime,
-noVNC link (orphaned rows included; a link only when the port is
-discoverable) — auto-refreshed by `<meta http-equiv="refresh" content="5">`.
-localhost-only bind is a security property; sharing beyond localhost is
-unsupported (FR-28 deferred). A bind failure is non-fatal: the MCP server is
-the product, the table is convenience. Stdout stays MCP-only; the dashboard
-never logs to it. The supervisor dies with its MCP client (stdin EOF or
-SIGINT/SIGTERM), leaving containers as adoptable orphans.
+The daemon serves ONE static route on `/`: a no-JS HTML table — one row per
+session: id, status, uptime, noVNC link (orphaned rows included; a link only
+when the port is discoverable) — auto-refreshed by
+`<meta http-equiv="refresh" content="5">`. localhost-only bind is a security
+property; sharing beyond localhost is unsupported (FR-28 deferred). Stdout
+stays clean; the dashboard never logs to it.
+
+On SIGINT/SIGTERM the daemon stops the HTTP server and kills all shell
+channels; containers stay and become adoptable orphans (the next start lists
+them as `orphaned`). stdin is not a shutdown trigger — the daemon is meant to
+run under a service manager; see [systemd-micke.service](systemd-micke.service).
 
 ## The four tools
 
@@ -67,18 +94,23 @@ All failures return one JSON error shape as MCP tool errors:
 `{code, message, hint}` — codes: `IMAGE_MISSING`, `WORKSPACE_INVALID`,
 `SCREEN_INVALID`, `DESKTOP_BOOT_TIMEOUT`, `DOCKER_UNAVAILABLE`, `DOCKER_ERROR`,
 `SESSION_NOT_FOUND`, `SESSION_ORPHANED`, `SHELL_UNAVAILABLE`, `BAD_ARGUMENT`,
-`INSUFFICIENT_MEMORY`, `UNKNOWN_TOOL`; fatal startup failures (second
-supervisor) exit the process with `LOCK_HELD` on stderr.
+`INSUFFICIENT_MEMORY`, `UNKNOWN_TOOL`; fatal startup failures exit the process
+with `LOCK_HELD` (second supervisor on the same state dir) or `PORT_HELD`
+(daemon port already bound) on stderr.
 
 Sessions are Docker containers labeled `--label micke.session=<id>`, run with
 `-d --init --shm-size=1g -p 127.0.0.1::6080/tcp` (Docker picks the host port;
 the supervisor reads it back with `docker port`), plus an optional
 `-v <host dir>:/workspace` bind. The supervisor waits for the image's
 `micke: desktop ready` log line before answering `session_create`. Containers
-outliving the supervisor are listed as `orphaned` on the next start; close them
-with `session_close`. Pull policy (FR-31/32): pull-if-missing before a session
-starts, under the create/boot mutex — one pull at a time, never while any
-session is live; sessions always run cache-only (`--pull=never`).
+outliving the supervisor are listed as `orphaned` on the next start. Orphans
+remain list/close-only for now — `session_shell` on one returns
+`SESSION_ORPHANED`, `session_close` reaps it; re-attach lands with the gvx
+runtime swap (owner decision, [research/gvx-only-analysis.md](research/gvx-only-analysis.md) §10 —
+Docker-specific re-attach machinery is throwaway). Pull policy (FR-31/32):
+pull-if-missing before a session starts, under the create/boot mutex — one
+pull at a time, never while any session is live; sessions always run
+cache-only (`--pull=never`).
 
 ## Shell channel protocol
 
@@ -142,21 +174,26 @@ everything inside it.
 
 ## Tests
 
-All end-to-end against real Docker on this host:
+All end-to-end against real Docker on this host; every suite spawns the real
+daemon as a subprocess on a kernel-picked port (`MICKE_PORT=0`) and talks MCP
+over Streamable HTTP (`tests/helpers.ts`):
 
-- `bun test tests/mmin-phase1.test.ts` — image retag, server over stdio,
+- `bun test tests/mmin-phase1.test.ts` — image retag, daemon over HTTP,
   create → noVNC HTTP 200, `agent-desktop` status/launch/wait/snapshot, shell
   persistence, output cap, timeout kill, workspace bind, close teardown,
-  structured errors, orphan detection/reap after a supervisor restart.
+  structured errors, orphan detection/reap after a daemon restart.
 - `bun test tests/mmin-phase2.test.ts` — guards + dashboard: instance lock
   (second supervisor exits with `LOCK_HELD`), RAM floor
   (`INSUFFICIENT_MEMORY`), pull serialization (two concurrent creates of a
   missing image → one `docker pull`, both proceed), the static table
   (meta-refresh, localhost-only bind, live row + link, row gone after close).
   Needs network for the hello-world pull.
+- `bun test tests/http-daemon.test.ts` — daemon shape: disconnect survival
+  (client A leaves, fresh client B drives the same session) and two clients on
+  one shared session (concurrent shells serialize; both see the same row).
 - `bun test tests/leak-cycles.test.ts` — FR-10: 20 create/shell/close cycles;
-  supervisor fd and child counts return to baseline (fds ±8 tolerance,
+  daemon fd and child counts return to baseline (fds ±8 tolerance,
   documented in the file), zero `micke.session` containers, zero stray
   `docker exec` processes. Runs in ~30 s.
 
-`bun test` (or `bun run test`) runs all three (~55 s total).
+`bun test` (or `bun run test`) runs all four (~70-80 s total).

@@ -1,8 +1,8 @@
 // dashboard — the ONE static route (FR-23/24/25/29): a no-JS HTML table of
-// sessions at 127.0.0.1:<MICKE_DASHBOARD_PORT> (default 7800), auto-refreshed
-// by a meta tag. Served from inside the supervisor process; stdout stays
-// MCP-clean (diagnostics → stderr, like everywhere else). No framework, no
-// build step, no extra deps — a template literal.
+// sessions, auto-refreshed by a meta tag. Rendered by main.ts's `/` route on
+// the daemon port (127.0.0.1, loopback-only bind). No framework, no build
+// step, no extra deps — a template literal. Diagnostics go to stderr, like
+// everywhere else; nothing here ever writes to stdout.
 
 import type { SessionRow } from "./supervisor.js";
 
@@ -58,39 +58,16 @@ ${body}
 `;
 }
 
-export interface Dashboard {
-  port: number; // 0 when the dashboard could not start (non-fatal)
-  stop(): void;
-}
-
 /**
- * Serve `/` on 127.0.0.1 (localhost-only bind is a security property, FR-23).
- * Failure to bind is non-fatal: the MCP server is the product, the table is
- * convenience — log to stderr and continue without it.
+ * The `/` response: the whole page. A listing failure is a plain 500 — the
+ * table is convenience, the daemon stays up.
  */
-export function startDashboard(listSessions: () => Promise<SessionRow[]>): Dashboard {
-  const port = parseInt(process.env.MICKE_DASHBOARD_PORT || "7800", 10);
-  try {
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port,
-      development: false,
-      fetch: async (req): Promise<Response> => {
-        if (new URL(req.url).pathname !== "/") {
-          return new Response("not found\n", { status: 404 });
-        }
-        try {
-          const body = renderDashboard(await listSessions());
-          return new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return new Response(`micke: session list failed: ${esc(msg)}\n`, { status: 500 });
-        }
-      },
-    });
-    return { port: server.port ?? port, stop: () => server.stop(true) };
-  } catch (err) {
-    console.error(`micke: dashboard not started on port ${port} (${String(err)}) — continuing without it`);
-    return { port: 0, stop: () => {} };
-  }
+export function dashboardResponse(listSessions: () => Promise<SessionRow[]>): Promise<Response> {
+  return listSessions().then(
+    (rows) => new Response(renderDashboard(rows), { headers: { "content-type": "text/html; charset=utf-8" } }),
+    (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return new Response(`micke: session list failed: ${esc(msg)}\n`, { status: 500 });
+    },
+  );
 }
