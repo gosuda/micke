@@ -8,8 +8,9 @@ same loopback port (see below).
 
 For how to run it, see the root [README.md](../README.md).
 
-Requirements: Linux x86_64 (the published image is `linux/amd64`) with `rungv`
-v0.4.x on `PATH`, and the micke image in gvx's cache (`rungv pull -cache-dir ~/.cache/micke/gvx
+Requirements: Linux x86_64 or arm64 (the published image is multi-arch:
+`linux/amd64` + `linux/arm64`) with `rungv` v0.4.x on `PATH`, and the micke
+image in gvx's cache (`rungv pull -cache-dir ~/.cache/micke/gvx
 ghcr.io/gosuda/micke:latest`). Docker is **not** a runtime dependency.
 
 Environment:

@@ -35,7 +35,7 @@ Sessions are **not** owned by the daemon: if micke crashes or restarts, the sand
 
 ## Quick start
 
-Requirements: Linux x86_64 (the published image is `linux/amd64`; gvx runs the image architecture that matches the host) with gvx (`rungv` v0.4.x) on `PATH`, Bun, and the micke image in gvx's cache.
+Requirements: Linux x86_64 or arm64 (the published image is multi-arch: `linux/amd64` + `linux/arm64`) with gvx (`rungv` v0.4.x) on `PATH`, Bun, and the micke image in gvx's cache.
 
 ```sh
 # 1. get the desktop image (or let the daemon pull it on the first create
@@ -159,7 +159,8 @@ Adjust the port if you set `MICKE_PORT`.)
 
 Users never build images. CI builds and pushes
 `ghcr.io/gosuda/micke` on every `image/**` change
-(`.github/workflows/image.yml`); that is the distribution leg. For local
+(`.github/workflows/image.yml`) for `linux/amd64` and `linux/arm64` on native
+GitHub runners (no QEMU); that is the distribution leg. For local
 development, Docker can still be used as the **build tool**:
 
 ```sh

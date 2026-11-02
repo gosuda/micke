@@ -150,7 +150,7 @@ digest pinning is FR-30's trigger.
 
 | ID | Pri | Requirement | Source | Status | M-min |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| FR-38 | P0 | **gvx (rungv v0.4.x, pinned) is the ONLY runtime:** unprivileged, daemonless, seccomp self-lockdown; `-m 2g` default (`MICKE_SESSION_MEMORY`); ~2 concurrent chromium sessions per 8 GiB host (planning number ~2 GiB PSS each). Docker is not a runtime dependency — it survives only as the CI build tool and the `docker save → rungv load` fallback. | locked design 6 | implemented | **in** |
+| FR-38 | P0 | **gvx (rungv v0.4.x, pinned) is the ONLY runtime:** the published image is multi-arch (`linux/amd64` + `linux/arm64`, native CI runners, no QEMU); unprivileged, daemonless, seccomp self-lockdown; `-m 2g` default (`MICKE_SESSION_MEMORY`); ~2 concurrent chromium sessions per 8 GiB host (planning number ~2 GiB PSS each). Docker is not a runtime dependency — it survives only as the CI build tool and the `docker save → rungv load` fallback. | locked design 6 | implemented | **in** |
 | FR-39 | P0 | gvx runtime: unprivileged, no daemon/root/host namespaces, seccomp self-lockdown; ~2 GiB/chromium session → ~2 per 8 GiB host; `-m` per FR-18. The deferral trigger was fired by OWNER DECISION 2026-11-02, not by the upstream events it anticipated; the v0.4.x API-stability risk is ACCEPTED (pinned binary). | locked design 6; feasibility | implemented, verified end-to-end | **fired → P0** |
 | FR-40 | cut | ~~Same image runs under both runtimes with verified parity.~~ Single runtime (FR-38): the 83-ref parity receipt stays banked as evidence, not a standing promise. | locked design 6 | n/a | **cut** |
 
@@ -256,7 +256,7 @@ FR-45's large-file aspects stay lean (audit trigger, should they ever be needed:
 | x11vnc + websockify/noVNC | in-image | Per-session live mirror | Plain TCP to gvx forwards (~78 MB/s measured; 3 s guest-dial window; port ranges refused) |
 | MCP protocol | — | The only agent-facing surface | Exactly four tools (FR-5) |
 
-Host requirements: Linux x86_64 (the published image is `linux/amd64`; the image architecture must match the host); ~2 GiB free RAM per gvx chromium session (4.5× multiplier — Sentry page tables, netstack, stubs; budget PSS, not RSS); gvx `/dev/shm` defaults to half of host RAM (no `--shm-size` flag needed); first use requires network for the image pull (no offline cold-start story).
+Host requirements: Linux x86_64 or arm64 (the published image is multi-arch: `linux/amd64` + `linux/arm64`, built on native CI runners); ~2 GiB free RAM per gvx chromium session (4.5× multiplier — Sentry page tables, netstack, stubs; budget PSS, not RSS); gvx `/dev/shm` defaults to half of host RAM (no `--shm-size` flag needed); first use requires network for the image pull (no offline cold-start story).
 
 ## 10. Risks
 

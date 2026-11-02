@@ -1,4 +1,4 @@
-# image — build and push the micke desktop image to ghcr.io.
+# image — build and push the multi-arch micke desktop image to ghcr.io.
 #
 # Purpose: the maintainer-side build leg of the pull-based image distribution.
 # micke's runtime is gvx-only (owner MUST 2026-11-02): users `rungv pull` this
@@ -6,6 +6,13 @@
 # tool (Buildx/build-push-action) and `docker save` → `rungv load` remains the
 # air-gapped ingest fallback — Docker is not a session runtime. This workflow
 # is the only place the image is built going forward.
+#
+# Platform builds are NATIVE, not emulated:
+#   - linux/amd64 -> ubuntu-latest
+#   - linux/arm64 -> ubuntu-24.04-arm (GitHub-hosted Arm runner, free for
+#     PUBLIC repos; the label does not exist for private repos)
+# Each job builds and pushes its single platform by digest; the `merge` job
+# assembles the final manifest list. No docker/setup-qemu-action anywhere.
 #
 # Build-context contract: the Dockerfile lives in image/ but its COPY sources
 # (image/entrypoint.sh, image/driver.sh, image/micke-chromium.sh) are relative
@@ -34,7 +41,17 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm # native Arm runner; no QEMU
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7
@@ -49,7 +66,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata (tags & labels)
+      # One platform per native runner; push by digest so the merge job can
+      # assemble a manifest list without rebuilding under emulation.
+      - name: Build and push by digest (${{ matrix.platform }})
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: . # repo root — see header comment
+          file: image/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=micke
+          outputs: type=image,name=ghcr.io/gosuda/micke,push-by-digest=true,name-canonical=true,push=true
+          # The merge job assembles the final manifest list from these
+          # single-platform digests; keep attestations out until signing
+          # (FR-36) so the index is exactly the two platform manifests.
+          provenance: false
+          cache-from: type=gha,scope=micke-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags)
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -58,14 +131,12 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: . # repo root — see header comment
-          file: image/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/gosuda/micke@sha256:%s ' *)
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect ghcr.io/gosuda/micke:${{ steps.meta.outputs.version }}

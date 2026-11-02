@@ -379,7 +379,8 @@ invoked BY the driver as a child — unchanged file). Note in §11.
 ## 6. Image & distribution
 
 - **Source of truth: `ghcr.io/gosuda/micke`** (workflow live: tags `latest` +
-  `sha-<sha>`, linux/amd64, GHA cache). Docker's ONLY remaining product roles:
+  `sha-<sha>`, multi-arch `linux/amd64` + `linux/arm64` built on native GitHub
+  runners without QEMU, GHA cache). Docker's ONLY remaining product roles:
   CI build tool and the `docker save | rungv load` ingest fallback. Never a
   runtime dependency.
 - **`MICKE_IMAGE` default: `ghcr.io/gosuda/micke:latest`** (was `micke:latest`,
