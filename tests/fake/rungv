@@ -1,0 +1,121 @@
+#!/usr/bin/env bun
+// tests/fake/rungv — a rungv stand-in that io.spawnSession can spawn.
+//
+// WHY: the supervisor's lifecycle (pidfile, adoption, SIGTERM teardown, port
+// discovery) is host code, not guest code. Booting a real 2 GB gvx sandbox to
+// test it costs minutes and hides which step failed. This script is a real
+// child process with the same argv shape and the same three log lines, so the
+// supervisor's parsing, polling and process handling stay on the real path.
+//
+// It handles the CLI surface micke uses:
+//   rungv version
+//   rungv inspect -cache-dir <cache> <image>   (present unless MICKE_FAKE_MISSING_IMAGE)
+//   rungv images -cache-dir <cache>
+//   rungv pull -cache-dir <cache> <image>      (sleeps MICKE_FAKE_PULL_MS, then present)
+//   rungv run … -h micke-<id> -p 7801 -p 6080 … <image>
+//
+// `run` binds two real loopback listeners, prints the exact publish lines and
+// the desktop-ready line, and serves the fake guest (tests/fake/guest.ts) on
+// the 7801 mapping. SIGTERM exits 0; SIGKILL kills it like any process, so
+// session_close's escalation is exercised for real.
+
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { startFakeGuest } from "./guest.ts";
+
+const argv = process.argv.slice(2);
+const command = argv[0] ?? "";
+
+const logPath = process.env.MICKE_FAKE_RUNGV_LOG;
+const log = (event: Record<string, unknown>) => {
+  if (!logPath) return;
+  appendFileSync(logPath, JSON.stringify(event) + "\n");
+};
+
+function argValue(flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
+function cacheDir(): string {
+  return argValue("-cache-dir") ?? join("/tmp", "micke-fake-cache");
+}
+
+function markerPath(ref: string): string {
+  return join(cacheDir(), ".fake-pulled", ref.replace(/[^A-Za-z0-9_.-]/g, "_"));
+}
+
+function say(line: string): void {
+  process.stdout.write(line + "\n");
+}
+
+if (command === "version") {
+  say("rungv v0.4.1-fake");
+  process.exit(0);
+}
+
+if (command === "inspect") {
+  const ref = argv[argv.length - 1] ?? "";
+  // `inspect` succeeds for everything the suite does not explicitly mark as
+  // missing, so ensureImage() never reaches the network.
+  if (process.env.MICKE_FAKE_MISSING_IMAGE === ref && !existsSync(markerPath(ref))) {
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+if (command === "images") {
+  say("REPOSITORY TAG");
+  process.exit(0);
+}
+
+if (command === "pull") {
+  const ref = argv[argv.length - 1] ?? "";
+  const started = Date.now();
+  log({ ev: "pull_start", ref, pid: process.pid });
+  await Bun.sleep(Number.parseInt(process.env.MICKE_FAKE_PULL_MS ?? "200", 10));
+  mkdirSync(join(cacheDir(), ".fake-pulled"), { recursive: true });
+  writeFileSync(markerPath(ref), `${Date.now()}\n`);
+  log({ ev: "pull_end", ref, pid: process.pid, ms: Date.now() - started });
+  process.exit(0);
+}
+
+if (command !== "run") {
+  console.error(`fake rungv: unsupported command "${command}" (${argv.join(" ")})`);
+  process.exit(2);
+}
+
+const hostname = argValue("-h") ?? "micke-unknown";
+const guest = startFakeGuest({
+  session: hostname,
+  logPath: process.env.MICKE_FAKE_SHELL_LOG,
+});
+const novnc = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  development: false,
+  fetch: () =>
+    new Response(
+      "<!DOCTYPE html><html><head><title>noVNC (fake)</title></head><body><h1>noVNC</h1></body></html>",
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    ),
+});
+
+log({ ev: "run_start", session: hostname, pid: process.pid, guest_port: guest.port, novnc_port: novnc.port });
+
+// Exactly the two lines gvxio.parsePublishLine matches, then the readiness line.
+say(`rungv: publishing 127.0.0.1:${guest.port} -> 7801/tcp`);
+say(`rungv: publishing 127.0.0.1:${novnc.port} -> 6080/tcp`);
+say("micke: desktop ready");
+
+const shutdown = () => {
+  try { guest.stop(); } catch { /* already closed */ }
+  try { novnc.stop(true); } catch { /* already closed */ }
+  log({ ev: "run_exit", session: hostname, pid: process.pid });
+  process.exit(0);
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+// The open listeners keep the event loop alive; this promise just parks main.
+await new Promise<never>(() => {});

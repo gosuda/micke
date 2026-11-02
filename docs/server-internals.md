@@ -271,38 +271,86 @@ Mechanics inside the wrapper (baked into the image at `/tmp/handler.sh`):
 
 ## Tests
 
-All end-to-end against real gvx on this host; every suite spawns the real
-daemon as a subprocess on a kernel-picked port (`MICKE_PORT=0`) and talks MCP
-over Streamable HTTP (`tests/helpers.ts`). The shared image comes from
+Two tiers, because the old default booted real 2 GB gvx sandboxes (minutes per
+run) and `tests/mmin-phase1.test.ts` was one test wrapping ~15 steps: a failure
+named nothing, so agents re-ran the whole suite to find it. The suite stayed
+green through three real defects (workspace not writable on macOS,
+`agent-desktop press` SIGSEGV, a `PATH` wedge) because it asserted only what
+the author already believed. The fix is demotion + distribution, not deletion.
+
+### Fast tier — `bun test tests/` (default)
+
+No sandbox, no `rungv` binary, no image; target under 10 seconds. Every suite
+spawns the real daemon as a subprocess on a kernel-picked port (`MICKE_PORT=0`)
+and talks MCP over Streamable HTTP (`tests/helpers.ts`). The guest and gvx are
+replaced by `tests/fake/`:
+
+- `tests/fake/guest.ts` — an in-process TCP server that speaks the guest half
+  of the shell protocol byte-for-byte: `===SHELL_READY===`, one
+  `__micke_run` request, one frame. Commands script echo, exact bytes,
+  timeout, large output, a chosen rc, and a mid-frame close.
+- `tests/fake/rungv` — a real child process `io.spawnSession` spawns via
+  `MICKE_RUNGV`. It binds real listeners, prints the exact
+  `rungv: publishing …` lines and the desktop-ready line, serves the fake guest
+  on the `7801` mapping, and exits cleanly on SIGTERM/SIGKILL. Lifecycle,
+  pidfile, adoption and process reaping therefore stay on the production path.
+
+Fast suites:
+
+- `tests/shell-protocol.test.ts` — frame parsing (exact stdout/stderr,
+  trailing newline or not), `timed_out`, truncation and dropped-byte count,
+  non-zero rc, `cwd` honored / `CWD_INVALID` / relative and empty cwd
+  `BAD_ARGUMENT`, a mid-frame close → `SHELL_UNAVAILABLE` with the next call
+  working, disconnect survival, two clients on one session, and the
+  concurrency cap (parallel slots, oversubscription queues).
+- `tests/lifecycle.test.ts` — create → `session_list` row, adoption after
+  SIGKILLing the daemon (same pidfile, ports and sandbox), `session_close`
+  killing the fake rungv and deleting the pidfile, and orphaned-record
+  handling (`SESSION_ORPHANED`, reaped by close).
+- `tests/dashboard.test.ts` — empty table + meta refresh, loopback-only bind,
+  live row (id/status/uptime/noVNC link), the link opening, row gone after
+  close.
+- `tests/guards.test.ts` — create guards (`SESSION_NOT_FOUND`,
+  `WORKSPACE_INVALID`, `SCREEN_INVALID`, `WORKSPACE_NOT_WRITABLE`), the
+  free-RAM floor (Linux only), and pull serialization (two concurrent creates
+  of a missing image → one fake pull).
+- `tests/leak-cycles.test.ts` — repeated create/shell/close cycles; daemon fd
+  and child counts return to baseline (fds ±8 tolerance, documented in the
+  file), every sandbox pid from the run is gone, zero pidfiles/logs.
+
+The host-side unit suites (`agent-desktop-shim`, `micke-chromium`,
+`micke-find`, `micke-key`, `micke-state`, `page-text`, `workspace`) stay in the
+same tier and need no harness.
+
+### E2E tier — `MICKE_E2E=1 bun test tests/` (or `bun run test:e2e`)
+
+Real image, only what genuinely needs it. The shared image comes from
 `MICKE_TEST_IMAGE` (else `MICKE_IMAGE`; default
 `ghcr.io/gosuda/micke:latest`) and is pulled once into `MICKE_TEST_CACHE_DIR`
-(else `MICKE_GVX_CACHE`, else the default cache) if missing:
+(else `MICKE_GVX_CACHE`, else the default cache) if missing. Files live in
+`tests/e2e/` (plus `tests/stateless-shell.test.ts`, kept at its original path),
+are gated with `describe.skipIf(!E2E)`, and carry an explicit per-test timeout.
+`bun test tests/` discovers them but skips them without booting anything.
 
-- `bun test tests/stateless-shell.test.ts` — the `session_shell` contract on
-  ONE session: cwd/env do not persist, `cwd:` is honored and validated
-  (`CWD_INVALID`), the old PATH-replay bug is a regression test, parallel
-  calls overlap (guest-timestamp ordering, no host queue), a burst above the
-  cap completes, a timeout kills only the command (no strays), a `nohup`
-  job survives its call, and a killed handler cannot wedge the session.
-- `bun test tests/mmin-phase1.test.ts` — daemon over HTTP, create → noVNC
-  HTTP 200, `agent-desktop` status/launch/wait/snapshot with page content in
-  the tree, the two stateless touch-points (no cwd/env carry-over, PATH
-  regression), output cap, timeout kill, workspace bind, close teardown,
-  structured errors, and the **adoption proof** (SIGKILL the daemon, restart,
-  session is `ready`, a fresh shell re-attaches, the pre-crash chromium window
-  is still there).
-- `bun test tests/mmin-phase2.test.ts` — guards + dashboard: instance lock
-  (second supervisor exits with `LOCK_HELD`), RAM floor
-  (`INSUFFICIENT_MEMORY`), pull serialization (two concurrent creates of a
-  missing image → one `rungv pull`, both proceed), the static table
-  (meta-refresh, localhost-only bind, live row + link, row gone after close).
-  Needs network for the hello-world pull.
-- `bun test tests/http-daemon.test.ts` — daemon shape: disconnect survival
-  (client A leaves, fresh client B drives the same session) and two clients on
-  one shared session (concurrent, independent fresh bashes; both see the same
-  row).
-- `bun test tests/leak-cycles.test.ts` — 20 create/shell/close cycles;
-  daemon fd and child counts return to baseline (fds ±8 tolerance, documented
-  in the file), zero live `rungv run … micke-` processes, zero pidfiles.
+- `tests/e2e/boot.test.ts` — create → one shell command → close; no process or
+  pidfile left.
+- `tests/e2e/daemon-lock.test.ts` — the instance lock (`LOCK_HELD`, clean
+  stdout) on the fake rungv, gated because its 1.5 s retry would dominate the
+  fast budget.
+- `tests/e2e/desktop.test.ts` — `agent-desktop status` (a11y granted), launch
+  chromium, `micke-find` a real link, click it, and verify the navigation with
+  `micke-state`.
+- `tests/stateless-shell.test.ts` — one session: cwd/env do not persist,
+  `cwd:` honored/validated, the PATH-replay regression, overlapping parallel
+  calls, a burst above the cap, timeout kill with no strays, `nohup` survival,
+  a killed handler not wedging the next call, and real in-guest output
+  truncation. Kept at its original path (still `MICKE_E2E`-gated) so
+  `bun test tests/stateless-shell.test.ts` remains a valid one-file selection.
+- `tests/e2e/workspace.test.ts` — the one thing unit tests cannot reach: guest
+  uid vs host mode across a real gvx mount (auto workspace writable + host
+  visible, explicit 0777 writable, unwritable mode refused before boot).
 
-`bun test` (or `bun run test`) runs all four.
+**E2E is not part of the edit loop.** Run it once before pushing, or not at all
+for docs/test-only changes. If an assertion fails twice, stop and report
+instead of re-running the suite. A failure must name its step; never add a
+multi-step mega-test. See [AGENTS.md](../AGENTS.md).

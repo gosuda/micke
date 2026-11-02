@@ -13,6 +13,9 @@ import { homedir } from "node:os";
 export const MAIN = join(import.meta.dir, "..", "src", "main.ts");
 export const SERVER_DIR = join(import.meta.dir, "..");
 
+/** The real-image tier is opt-in: `bun test tests/` must never boot a sandbox. */
+export const E2E = process.env.MICKE_E2E === "1";
+
 export const RUNGV = process.env.MICKE_RUNGV || "rungv";
 
 /** micke's EROFS cache (same default as src/gvxio.ts). */
@@ -73,6 +76,45 @@ export async function ensureImage(ref = IMAGE, cache = GVX_CACHE): Promise<void>
   if (pull.rc !== 0) {
     throw new Error(`rungv pull ${ref} failed (rc=${pull.rc}): ${pull.stderr.trim().slice(-800)}`);
   }
+}
+
+/** One MCP tool call; a structured error becomes a thrown Error. */
+export async function callTool<T = any>(
+  client: Client,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  const res: any = await client.callTool({ name, arguments: args });
+  const text = res.content?.[0]?.text ?? "{}";
+  if (res.isError) throw new Error(`tool ${name} errored: ${text}`);
+  return res.structuredContent ?? JSON.parse(text);
+}
+
+/** One MCP tool call that must fail; returns the structured {code,message,hint}. */
+export async function callToolErr(
+  client: Client,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<{ code: string; message: string; hint: string | null }> {
+  const res: any = await client.callTool({ name, arguments: args });
+  if (!res.isError) throw new Error(`tool ${name} unexpectedly succeeded: ${res.content?.[0]?.text ?? ""}`);
+  return JSON.parse(res.content[0].text);
+}
+
+/** Poll until `check` returns truthy (or throw with the last value). */
+export async function waitUntil<T>(
+  label: string,
+  check: () => Promise<T | false | null | undefined>,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown = null;
+  while (Date.now() < deadline) {
+    last = await check();
+    if (last) return last as T;
+    await Bun.sleep(50);
+  }
+  throw new Error(`timed out waiting for ${label} (last: ${JSON.stringify(last)})`);
 }
 
 export function spawnDaemon(env: Record<string, string> = {}): Promise<Daemon> {

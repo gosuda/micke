@@ -144,13 +144,33 @@ Five additions make the shell agent-friendly:
   `agent-desktop find`, which needs `--first` and then just spends its budget.
 
 See [docs/server-internals.md](docs/server-internals.md) for configuration,
-the shell-channel protocol, adoption semantics, and the integration tests
-(`bun test tests/`).
+the shell-channel protocol, and adoption semantics. Tests are described under
+[Testing](#testing).
 
 - Driving chromium in a session — required flags, `--arg=` passthrough,
   /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
 - Pausing so a human can log in over noVNC (the credential goes straight into
   the desktop, not the transcript): [docs/manual-intervention.md](docs/manual-intervention.md)
+
+## Testing
+
+```sh
+bun test tests/                 # fast tier: no sandbox, no rungv, no image (<10 s)
+MICKE_E2E=1 bun test tests/     # E2E tier: real image (bun run test:e2e)
+```
+
+The fast tier replaces the guest and `rungv` with `tests/fake/` (a real TCP
+guest and a real fake-rungv child process), so the wire protocol, supervisor
+lifecycle, adoption and dashboard run in seconds. The E2E tier is mainly the
+residue that needs the real image: boot smoke, desktop smoke (chromium →
+`micke-find` → click → `micke-state`), the stateless-shell contract, and the
+`/workspace` writability contract. The instance-lock check also sits in the
+gated tier because its 1.5 s retry would dominate the fast budget.
+
+**E2E is not part of the edit loop** — run it once before pushing, or not at
+all for docs/test-only changes. If an assertion fails twice, stop and report
+instead of re-running. A failure must name its step; never add a multi-step
+mega-test. See [AGENTS.md](AGENTS.md) for the full rules.
 
 ## Environment
 
