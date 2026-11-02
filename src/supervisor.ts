@@ -1,10 +1,10 @@
 // supervisor — one process owning N micke sessions (gvx sandboxes).
 //
-// A session is ONE foreground `rungv run` child plus a lazy TCP shell channel
-// into the guest's socket driver. Identity is the per-session pidfile under
-// <state>/sessions/<id>.json (gvx has no labels, ps, or daemon state): it
-// records the rungv pid and both host ports, survives daemon death, and lets
-// the next daemon adopt still-running sandboxes.
+// A session is ONE foreground `rungv run` child plus a lazy shell endpoint into
+// the guest's socket driver (one TCP connection per command; see shell.ts).
+// Identity is the per-session pidfile under <state>/sessions/<id>.json (gvx has
+// no labels, ps, or daemon state): it records the rungv pid and both host ports,
+// survives daemon death, and lets the next daemon adopt still-running sandboxes.
 //
 // Every failure surfaces as MickeError with one JSON shape: {code, message, hint}.
 
@@ -13,7 +13,7 @@ import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { dlopen } from "bun:ffi";
 import * as io from "./gvxio.js";
-import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from "./shell.js";
+import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, type ShellResult } from "./shell.js";
 import { guestCanWrite, guestIds } from "./workspace.js";
 
 // flock(2) via FFI: the kernel releases the lock when this process dies, so a
@@ -57,7 +57,6 @@ export interface SessionRow {
 
 interface LiveSession extends io.SessionRecord {
   shell: ShellChannel | null;
-  shellReady: Promise<ShellChannel> | null;
   child: io.SessionProcess | null;
 }
 
@@ -266,7 +265,7 @@ export class Supervisor {
       );
     }
 
-    const session: LiveSession = { ...rec, shell: null, shellReady: null, child };
+    const session: LiveSession = { ...rec, shell: null, child };
     this.sessions.set(id, session);
     return this.row(session, "ready");
   }
@@ -291,7 +290,8 @@ export class Supervisor {
     command: string,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
-  ) {
+    cwd?: string,
+  ): Promise<ShellResult> {
     const live = this.sessions.get(id);
     if (!live) {
       if (this.orphanStates.has(id)) {
@@ -299,8 +299,7 @@ export class Supervisor {
       }
       throw new MickeError("SESSION_NOT_FOUND", `no session "${id}"`, "Call session_list first.");
     }
-    const shell = await this.ensureShell(live);
-    return shell.run(command, timeoutMs, maxOutputBytes);
+    return this.shellFor(live).run(command, timeoutMs, maxOutputBytes, cwd);
   }
 
   async listSessions(): Promise<SessionRow[]> {
@@ -324,34 +323,26 @@ export class Supervisor {
   }
 
   /**
-   * Kill shell channels only (supervisor exit). rungv children deliberately
-   * stay alive: desktops, chromium windows, and human noVNC logins survive a
-   * daemon crash/restart, and the next start adopts them via their pidfiles.
+   * Close in-flight shell connections only (supervisor exit). rungv children
+   * deliberately stay alive: desktops, chromium windows, and human noVNC logins
+   * survive a daemon crash/restart, and the next start adopts them via their
+   * pidfiles.
    */
   async shutdown(): Promise<void> {
     for (const s of this.sessions.values()) s.shell?.kill();
   }
 
-  // ---- shell channel ------------------------------------------------------
+  // ---- shell endpoint -----------------------------------------------------
 
-  private async ensureShell(live: LiveSession): Promise<ShellChannel> {
-    if (live.shell?.alive) return live.shell;
-    if (live.shellReady) return live.shellReady;
-    live.shellReady = (async () => {
-      const channel = new ShellChannel(live.shell_host_port);
-      try {
-        live.shell?.kill();
-        live.shell = channel;
-        await channel.start();
-        return channel;
-      } catch (err) {
-        live.shell = null;
-        throw err;
-      } finally {
-        live.shellReady = null;
-      }
-    })();
-    return live.shellReady;
+  /**
+   * The shell endpoint for a session. It holds no socket (one connection per
+   * command), so there is nothing to reconnect: create it lazily, keep it.
+   */
+  private shellFor(live: LiveSession): ShellChannel {
+    if (!live.shell || !live.shell.alive) {
+      live.shell = new ShellChannel(live.shell_host_port);
+    }
+    return live.shell;
   }
 
   // ---- image policy --------------------------------------------------------
@@ -460,7 +451,7 @@ export class Supervisor {
   private adoptSessions(): void {
     for (const rec of io.listPidfiles(this.stateDir)) {
       if (io.procAlive(rec.rungv_pid) && io.procMatches(rec.rungv_pid, rec.session_id)) {
-        this.sessions.set(rec.session_id, { ...rec, shell: null, shellReady: null, child: null });
+        this.sessions.set(rec.session_id, { ...rec, shell: null, child: null });
       } else {
         this.orphanStates.set(rec.session_id, rec);
       }

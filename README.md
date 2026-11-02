@@ -13,14 +13,14 @@ AI agent ──MCP──> micke daemon ──> gvx sandbox (Xvfb :99 + openbox +
                 (4 tools)          + chromium + x11vnc/noVNC), one per session
                                         │
                                         agent-desktop (AT-SPI a11y tree: snapshot →
-                                        act on @ref → wait), driven through the
-                                        session's ONE persistent shell socket
+                                        act on @ref → wait), driven through
+                                        session_shell (a fresh bash per call)
                                         x11vnc/noVNC mirror of the display for humans
 ```
 
 1. **Session create** — the agent calls the `session_create` MCP tool.
 2. **Sandbox spawn** — micke runs one foreground `rungv run` child: a real Linux desktop (Xvfb + openbox + AT-SPI, chromium preinstalled).
-3. **Interaction** — the agent drives everything through `session_shell` (the one persistent shell per session): `agent-desktop` snapshot → act on `@ref` → wait loops, plus any CLI work. gvx has no `exec`, so the guest runs a tiny TCP shell driver at `:7801`; the host connects to it through `rungv -p`.
+3. **Interaction** — the agent drives everything through `session_shell` (a fresh bash per call; cwd/env do not persist): `agent-desktop` snapshot → act on `@ref` → wait loops, plus any CLI work. gvx has no `exec`, so the guest runs a tiny TCP shell driver at `:7801`; the host opens one connection per command through `rungv -p`.
 4. **Session close** — the rungv process tree is killed, leaving nothing behind.
 
 Sessions are **not** owned by the daemon: if micke crashes or restarts, the sandboxes stay alive (desktops, chromium windows, and human noVNC logins included). The next daemon start **adopts** them from their per-session pidfiles and a fresh `session_shell` re-attaches.
@@ -93,8 +93,9 @@ never as a session runtime.
 
 A supervisor + MCP daemon lives in [`src/`](src/) (Bun + TypeScript; MCP over
 Streamable HTTP; exactly four tools: `session_create`, `session_list`,
-`session_close`, `session_shell` — one persistent shell per session, which is
-how agents drive the desktop through `agent-desktop`).
+`session_close`, `session_shell` — a stateless shell (one fresh bash per call:
+`cd`/`export` do not persist; pass `cwd:` for a directory), which is how agents
+drive the desktop through `agent-desktop`).
 
 ```sh
 bun install
@@ -117,7 +118,7 @@ gvx has no uid mapping, so an explicit workspace must be writable by the guest
 `WORKSPACE_NOT_WRITABLE` and the exact `chmod -R a+w <path>` remedy. The
 auto-created workspace is `chmod 0777` for that reason. Artifacts (downloads,
 dumps, the occasional screenshot) written there are already on the host — no
-base64 through the shell channel. Files are kept after `session_close`; delete
+base64 through the shell socket. Files are kept after `session_close`; delete
 the directory when you are done with it.
 
 Five additions make the shell agent-friendly:

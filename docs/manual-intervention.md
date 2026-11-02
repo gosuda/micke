@@ -54,7 +54,8 @@ no human/agent input lock, so nothing enforces it.
 Give this to the agent (adapt the trigger) to bind the behavior above:
 
 > You are driving a micke session. ALL desktop interaction goes through the
-> session's shell (`session_shell`) with `agent-desktop`. When you hit
+> session's shell (`session_shell`) with `agent-desktop`. Each call is a fresh
+> bash (cwd/env do not persist), so make commands self-contained. When you hit
 > something only a human should do — an SSO/password prompt, a CAPTCHA, a
 > payment confirmation, or a judgment call — do this, exactly:
 > 1. Stop interacting with the desktop. Announce in your reply: "PAUSED on

@@ -101,8 +101,10 @@ rungv run -cache-dir ~/.cache/micke/gvx -pull=never -m 2g -p 7801 -p 6080 ghcr.i
 ## The driving loop (cheatsheet)
 
 One full verified loop over `https://example.com` — launch → wait for a window
-→ snapshot → click a `@ref` → re-snapshot. All of it goes through the ONE
-persistent shell (`session_shell`), where the env is already sourced.
+→ snapshot → click a `@ref` → re-snapshot. Each step is an INDEPENDENT
+`session_shell` call (every call is a fresh bash: no cwd or exported env
+carries over), with the desktop env already sourced in each one. The recipe is
+otherwise unchanged — the tools do not depend on shell state.
 
 ```bash
 # 1. launch (verified receipt: ok=true, window.accessible=true; title settles

@@ -2,13 +2,14 @@
 # micke guest driver — the image ENTRYPOINT under gvx.
 #
 # gvx has no exec and no detached containers: this process IS the sandbox's
-# lifetime, and the shell channel is a TCP listener inside the guest (reached
+# lifetime, and the shell endpoint is a TCP listener inside the guest (reached
 # through `rungv -p`). It:
 #
 #   1. writes the per-connection bash handler (/tmp/handler.sh) — the
 #      `__micke_run` framing wrapper, byte-equal to the old exec-channel INIT;
 #   2. starts a supervised python3 TCP listener on ${MICKE_SHELL_PORT} (7801);
-#      every connection gets a fresh bash (exec-channel semantics: cwd/env reset);
+#      every connection gets a fresh bash, and the host opens one connection
+#      per command: there is no persistent shell and no replayed cwd/env;
 #   3. boots the desktop by running the real /usr/local/bin/micke-entrypoint as
 #      a child (it re-execs itself under dbus-run-session);
 #   4. waits for /tmp/session.env AND the noVNC port, then emits the ready line
@@ -16,7 +17,7 @@
 #   5. exits if either the desktop or the listener supervisor dies, so a dead
 #      sandbox is an honest dead pidfile — never a half-live black hole.
 #
-# stdin is NEVER read: the TCP socket is the only shell channel.
+# stdin is NEVER read: the TCP socket is the only command channel.
 set -u
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
@@ -28,25 +29,21 @@ export MICKE_SHELL_PORT="$SHELL_PORT"
 # ---- handler.sh: per-connection bash (the old shell.ts INIT) ----------------
 cat >/tmp/handler.sh <<'HANDLER_EOF'
 __micke_after() {
-    # $1 = rc of the evaluated command; idempotent (first rc wins)
+    # $1 = rc of the evaluated command; idempotent (first rc wins).
+    # Nothing else is recorded: the shell is stateless (one bash per command),
+    # so there is no cwd or exported env to carry forward.
     if [ ! -s "$rcfile" ]; then printf '%s' "$1" > "$rcfile"; fi
-    printf '%s' "$PWD" > "$dfile"
-    export -p | sort > "$after"
 }
 __micke_sig() { __micke_after "$1"; exit "$1"; }
 __micke_run() {
     # $1 = timeout_ms (0 = none), $2 = max_output_bytes per stream, $3 = base64 command
     local tmo="$1" limit="$2" b64="$3"
-    local cmd out err rc before after dfile rcfile flag cpid wpid osz esz
+    local cmd out err rc rcfile flag cpid wpid osz esz
     cmd="$(printf '%s' "$b64" | base64 -d)"
     out="$(mktemp /tmp/.micke-out.XXXXXX)"
     err="$(mktemp /tmp/.micke-err.XXXXXX)"
-    before="$(mktemp /tmp/.micke-env.XXXXXX)"
-    after="$(mktemp /tmp/.micke-env2.XXXXXX)"
-    dfile="$(mktemp /tmp/.micke-dir.XXXXXX)"
     rcfile="$(mktemp /tmp/.micke-rc.XXXXXX)"
     flag="$(mktemp /tmp/.micke-flag.XXXXXX)"
-    export -p | sort > "$before"
     printf '===BEGIN===\n'
     (
         trap '__micke_sig 143' TERM
@@ -88,27 +85,20 @@ __micke_run() {
     fi
     if [ -s "$flag" ]; then printf '\n===TIMEOUT===\n'; fi
     printf '\n===END rc=%s===\n' "$rc"
-    # Persist cwd + exported env, but only if the command completed (not killed)
-    if [ -s "$rcfile" ] && [ -s "$dfile" ] && [ -s "$after" ] && [ ! -s "$flag" ]; then
-        while read -r n; do
-            case "$n" in ''|*[!A-Za-z0-9_]*|PWD|OLDPWD|SHLVL|_) continue ;; esac
-            unset "$n" 2>/dev/null || true
-        done < <(comm -23 "$before" "$after" | sed 's/^declare -[^ ]* \([^=]*\)=.*/\1/')
-        while IFS= read -r l; do
-            eval "$(printf '%s' "$l" | sed 's/^declare -x /declare -gx /')" 2>/dev/null || true
-        done < <(comm -13 "$before" "$after" | grep -v -e 'PWD=' -e 'OLDPWD=' -e 'SHLVL=' -e '^[^ ]* _=')
-        cd -- "$(cat "$dfile")" 2>/dev/null || true
-    fi
-    rm -f "$out" "$err" "$before" "$after" "$dfile" "$rcfile" "$flag"
+    rm -f "$out" "$err" "$rcfile" "$flag"
 }
 # Desktop env (DISPLAY/D-Bus/AT-SPI) is published by the entrypoint; wait for it
-# so agent-desktop works with no manual setup.
+# so agent-desktop works in every fresh bash with no manual setup. This is the
+# ONLY state that reaches a command: each connection is a new bash whose cwd is
+# the image WORKDIR and whose env is this file.
 i=0
 while [ "$i" -lt 100 ] && [ ! -f /tmp/session.env ]; do sleep 0.1; i=$((i+1)); done
 . /tmp/session.env 2>/dev/null || true
 set -m 2>/dev/null || true
 echo '===SHELL_READY==='
-# Serve one request line per command until the connection closes.
+# Serve request lines until the connection closes. The host sends exactly one
+# per connection and closes; the loop also keeps an older host (which held one
+# connection for many commands) working.
 while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
     eval "$line"

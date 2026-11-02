@@ -27,6 +27,7 @@ Environment:
 | `MICKE_GUEST_UID`          | `1000`                           | Guest uid used for the `/workspace` writability check |
 | `MICKE_GUEST_GID`          | `1000`                           | Guest gid used for the `/workspace` writability check |
 | `MICKE_PORT`               | `7800`                           | Daemon port on 127.0.0.1 — MCP + dashboard (`0` = kernel-picked) |
+| `MICKE_SHELL_CONCURRENCY`  | `8`                              | Max parallel `session_shell` calls per session (`0` = unlimited); beyond it calls queue briefly |
 | `MICKE_VNC_PASSWORD`       | unset                            | Optional classic-VNC password passed into the sandbox |
 
 ## Session state (the pidfile is the identity)
@@ -107,9 +108,9 @@ ready rows carry a link) — auto-refreshed by
 property; sharing beyond localhost is unsupported. Stdout
 stays clean; the dashboard never logs to it.
 
-On SIGINT/SIGTERM the daemon stops the HTTP server and kills all shell
-channels; **rungv sandboxes stay alive** and the next start adopts them (their
-pidfiles carry the pids and ports). stdin is not a shutdown trigger — the
+On SIGINT/SIGTERM the daemon stops the HTTP server and closes in-flight shell
+connections; **rungv sandboxes stay alive** and the next start adopts them
+(their pidfiles carry the pids and ports). stdin is not a shutdown trigger — the
 daemon is meant to run under a service manager (systemd, launchd, or similar).
 
 ## The four tools
@@ -119,7 +120,7 @@ daemon is meant to run under a service manager (systemd, launchd, or similar).
 | `session_create` | `{image?, workspace?, screen?}`                  | `{session_id, status: "ready", novnc_url, rungv_pid, hostname, image, workspace, screen, …}` |
 | `session_list`   | `{}`                                             | `{sessions: […]}` — ready rows carry `novnc_url`; a pidfile whose sandbox is gone appears as `status: "orphaned"` |
 | `session_close`  | `{session_id}`                                   | `{closed, sandbox_removed}` — also reaps orphans |
-| `session_shell`  | `{session_id, command, timeout_ms?, max_output_bytes?}` | `{session_id, stdout, stderr, rc, timed_out, truncated, duration_ms}` |
+| `session_shell`  | `{session_id, command, cwd?, timeout_ms?, max_output_bytes?}` | `{session_id, stdout, stderr, rc, timed_out, truncated, duration_ms}` |
 
 All failures return one JSON error shape as MCP tool errors:
 `{code, message, hint}` — codes: `IMAGE_MISSING`, `WORKSPACE_INVALID`,
@@ -166,7 +167,8 @@ a candidate:
 
 - `/proc` (or `ps`) says the pid is alive **and** its command line is
   `rungv … micke-<id>` → register as **ready**, with the ports from the file.
-  `session_shell` opens a fresh TCP connection to the still-booted desktop.
+  Each `session_shell` call opens its own fresh TCP connection to the
+  still-booted desktop.
 - Otherwise → list as **orphaned** (pidfile present, sandbox gone);
   `session_close` reaps the pidfile.
 
@@ -174,18 +176,35 @@ a candidate:
 escalates to SIGKILL after ~3 s, waits for the whole process tree to vanish
 (measured ~0.1 s, zero strays), then deletes the pidfile and log.
 
-## Shell channel protocol
+## Shell protocol (one connection per command)
 
-One TCP connection per session, opened lazily on the first `session_shell` and
-held for the session's life. The guest driver forks **one bash per
-connection**; a dropped connection is therefore recoverable (the next call
-reconnects with a fresh shell, cwd/env reset — exec parity), while the
-desktop keeps running.
+gvx has no `exec`, so `image/driver.sh` writes a small supervised python3
+listener (`/tmp/server.py`) into the guest; it accepts TCP connections and
+forks **one bash per connection** (`/tmp/handler.sh`). `session_shell` opens a
+connection **per call**: connect → wait for `===SHELL_READY===` → write one
+request line → read exactly one frame → close. Nothing stays open between
+calls.
 
-At connection start the guest bash waits for and sources `/tmp/session.env`
-(DISPLAY and the D-Bus session bus; AT-SPI is discovered through it) — so
-`agent-desktop` works with no manual env setup — enables `set -m`, defines
-`__micke_run`, and prints `===SHELL_READY===`.
+**Stateless by construction.** Every call is a fresh bash, so cwd and exported
+env do not persist (`cd /tmp` or `export FOO=bar` affects that call only) and
+there is no shell state to wedge. Choose a directory with the optional `cwd`
+argument (absolute guest path, default `/home/agent`) or make the command
+self-contained (`cd /tmp && ls`, `PATH=/x:$PATH cmd`). The host implements
+`cwd` by prefixing the command with a single-quoted `cd -- <dir>` — no caller
+input reaches an unquoted shell position — and a directory that does not exist
+returns `CWD_INVALID`. The desktop env (DISPLAY, D-Bus/AT-SPI) still reaches
+every fresh bash: the handler sources `/tmp/session.env` before printing the
+ready marker.
+
+Why the old persistent shell was removed: it replayed exported env between
+commands by diffing `export -p` snapshots in the guest. That replay `unset`
+changed variables **before** re-running `comm`/`grep`/`sed`, which resolve
+through the very `PATH` it had just unset — so one `export PATH=/x:$PATH` left
+the handler with an empty PATH and every later call died at `mktemp` with an
+empty frame and rc 1, permanently, until `session_close`. A fresh bash deletes
+that bug class, removes the host-side per-session queue (one slow command no
+longer blocks the session), and leaves nothing long-lived to wedge.
+
 Commands are base64-encoded so newlines are safe; the host writes one request
 line and parses one frame back:
 
@@ -213,36 +232,41 @@ Mechanics inside the wrapper (baked into the image at `/tmp/handler.sh`):
   exits/signals), the wrapper cats the files back between the markers.
 - **Timeout**: a watchdog subshell `( sleep T; kill -TERM -- -CPID; sleep 2; kill -KILL -- -CPID ) &`
   kills exactly the command's process group (TERM, then KILL after a 2 s
-  grace for commands that trap/ignore TERM). The persistent bash is in a
-  different process group and survives; the next command works normally.
-  On timeout the frame carries `===TIMEOUT===` and `rc` is 143 (TERM) or 137
-  (KILL). The watchdog itself runs in its own group and is killed after the
-  command completes, so fast commands leak no sleeping watchdogs.
-- **Persistence**: before the command the wrapper snapshots `export -p`; the
-  subshell re-dumps it (plus `pwd`) on normal exit or `exit N`. The wrapper
-  diffs the two (added/changed → `declare -gx`, removed → `unset`) and `cd`s to
-  the new directory. So **cwd and exported env persist across calls within one
-  connection**, and `unset` persists. Non-exported shell variables,
-  function/alias definitions, and shell options do not persist. A timed-out
-  (killed) command persists nothing — its partial state changes are
-  deliberately discarded.
+  grace for commands that trap/ignore TERM). On timeout the frame carries
+  `===TIMEOUT===` and `rc` is 143 (TERM) or 137 (KILL). The watchdog runs in
+  its own group and is killed after the command completes, so fast commands
+  leak no sleeping watchdogs.
+- **No state is carried forward**: the wrapper records only the exit code. The
+  handler bash exits when the host closes the connection, so a command cannot
+  leave an env or cwd behind for a later call — there is no later call in that
+  process.
 - **Semantics of children**: background jobs started by a command get their own
-  process groups (via `set -m`) and survive that command's completion; they die
-  with the sandbox on `session_close` (the rungv process tree is killed). A
-  timeout kills the command's own process group — children that escaped into
-  their own session/group (e.g. `setsid …`) survive it (a known, deferred
-  edge case).
+  process groups (via `set -m`) and survive that command's completion (and the
+  handler bash exiting). They die with the sandbox on `session_close` (the
+  rungv process tree is killed). A timeout kills the command's own process
+  group — children that escaped into their own session/group (e.g. `setsid …`)
+  survive it (a known, deferred edge case).
 - **Known framing edge**: command output that itself contains a line matching a
   marker (`===STDERR===`, `===END rc=N===`, …) can confuse the parser. Don't
   `echo '===END rc=0==='` from commands.
-- The channel is strictly serialized (one in-flight command per session). The
-  host hard-aborts (and kills the channel) if no frame arrives within
-  `max(timeout_ms, 1 s) + 15 s` (the guest watchdog should fire first; the
-  backstop covers a channel gone silent). Unlike the old exec channel, a dead
-  socket is **self-healing**: the next `session_shell` reconnects and resets
-  cwd/env.
+- **Late guest writes**: the host closes the connection once the complete frame
+  (through `===END rc=N===\n`) is parsed — a frame is never truncated. A guest
+  process that writes to the socket *after* that close (a background job that
+  kept stdout, or a watchdog racing a host-side backstop close) sees
+  `printf: write error: Broken pipe` / `EPIPE` in the guest. That is the write
+  side being late, not lost output: redirect background output
+  (`… >/dev/null 2>&1 &`).
+- **Concurrency**: calls per session run in parallel up to
+  `MICKE_SHELL_CONCURRENCY` (default 8; `0` = unlimited). Beyond the cap they
+  queue briefly rather than fail — the guest forks one bash per connection, so
+  an unbounded fan-out would be a guest fork bomb. The host hard-aborts (and
+  closes that connection) if no frame arrives within
+  `max(timeout_ms, 1 s) + 15 s`; the guest watchdog should fire first, and the
+  backstop only covers a connection gone silent. There is no reconnect logic
+  because there is no channel: a failed call is just a closed connection, and
+  the next call is a new one.
 - The listener is supervised in the guest (respawn, 10 crashes in 60 s →
-  sandbox exits). The channel dies with `session_close`; the sandbox does not
+  sandbox exits). The listener dies with `session_close`; the sandbox does not
   survive it.
 
 ## Tests
@@ -254,11 +278,19 @@ over Streamable HTTP (`tests/helpers.ts`). The shared image comes from
 `ghcr.io/gosuda/micke:latest`) and is pulled once into `MICKE_TEST_CACHE_DIR`
 (else `MICKE_GVX_CACHE`, else the default cache) if missing:
 
+- `bun test tests/stateless-shell.test.ts` — the `session_shell` contract on
+  ONE session: cwd/env do not persist, `cwd:` is honored and validated
+  (`CWD_INVALID`), the old PATH-replay bug is a regression test, parallel
+  calls overlap (guest-timestamp ordering, no host queue), a burst above the
+  cap completes, a timeout kills only the command (no strays), a `nohup`
+  job survives its call, and a killed handler cannot wedge the session.
 - `bun test tests/mmin-phase1.test.ts` — daemon over HTTP, create → noVNC
-  HTTP 200, `agent-desktop` status/launch/wait/snapshot, shell persistence,
-  output cap, timeout kill, dropped-channel reconnect (fresh shell), workspace bind, close teardown, structured errors,
-  and the **adoption proof** (SIGKILL the daemon, restart, session is `ready`,
-  a fresh shell re-attaches, the pre-crash chromium window is still there).
+  HTTP 200, `agent-desktop` status/launch/wait/snapshot with page content in
+  the tree, the two stateless touch-points (no cwd/env carry-over, PATH
+  regression), output cap, timeout kill, workspace bind, close teardown,
+  structured errors, and the **adoption proof** (SIGKILL the daemon, restart,
+  session is `ready`, a fresh shell re-attaches, the pre-crash chromium window
+  is still there).
 - `bun test tests/mmin-phase2.test.ts` — guards + dashboard: instance lock
   (second supervisor exits with `LOCK_HELD`), RAM floor
   (`INSUFFICIENT_MEMORY`), pull serialization (two concurrent creates of a
@@ -267,7 +299,8 @@ over Streamable HTTP (`tests/helpers.ts`). The shared image comes from
   Needs network for the hello-world pull.
 - `bun test tests/http-daemon.test.ts` — daemon shape: disconnect survival
   (client A leaves, fresh client B drives the same session) and two clients on
-  one shared session (concurrent shells serialize; both see the same row).
+  one shared session (concurrent, independent fresh bashes; both see the same
+  row).
 - `bun test tests/leak-cycles.test.ts` — 20 create/shell/close cycles;
   daemon fd and child counts return to baseline (fds ±8 tolerance, documented
   in the file), zero live `rungv run … micke-` processes, zero pidfiles.

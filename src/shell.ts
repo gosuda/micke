@@ -1,9 +1,16 @@
-// shell — ONE long-lived shell per session, over a TCP socket to the guest's
-// socket driver (image/driver.sh). gvx has no exec: the driver listens on
-// 127.0.0.1:<picked host port> -> guest :7801 and forks one bash per connection.
+// shell — ONE TCP connection per command to the guest's socket driver
+// (image/driver.sh). gvx has no exec: the driver listens on
+// 127.0.0.1:<picked host port> -> guest :7801 and forks one fresh bash per
+// connection.
 //
-// The host writes one request line per command and parses the frame that comes
-// back. Protocol (documented in docs/server-internals.md):
+// session_shell is STATELESS by construction: there is no persistent shell, so
+// there is no durable cwd, no durable exported env, and nothing that can wedge
+// for longer than one call. A call is: connect -> wait for ===SHELL_READY=== ->
+// write the request line -> read exactly one frame -> close. The desktop env
+// (DISPLAY/D-Bus/AT-SPI) still reaches each fresh bash: the guest handler
+// sources /tmp/session.env at startup (see image/driver.sh).
+//
+// The wire protocol is unchanged, so a stale cached image keeps working:
 //
 //   host -> guest:  __micke_run <timeout_ms> <max_output_bytes> <base64-cmd>\n
 //   guest -> host:
@@ -11,13 +18,20 @@
 //     <stdout bytes>\n===STDERR===\n
 //     <stderr bytes>\n[===TIMEOUT===\n]\n===END rc=N===\n
 //
-// The `__micke_run` wrapper lives in the image (byte-equal to the old exec
-// INIT): the command runs in a background process group so a per-command
-// watchdog can TERM/KILL exactly that group while the bash survives. cwd +
-// exported env persist across commands within one connection.
+// The `__micke_run` wrapper lives in the image: the command runs in a
+// background process group so a per-command watchdog can TERM/KILL exactly
+// that group.
 //
-// A dropped connection is recoverable: the desktop survives, a fresh connection
-// gets a fresh bash (exec-channel semantics), and the NEXT run() reconnects.
+// Why stateless, concretely: the old design kept one bash per session and
+// replayed exported env between commands by diffing `export -p` snapshots in
+// the guest. That replay (driver.sh, now deleted) `unset` changed variables
+// BEFORE re-running `comm`/`grep`/`sed`, which resolve through the very PATH it
+// had just unset. One `export PATH=/x:$PATH` therefore left the handler with an
+// empty PATH: every later call died at `mktemp` before emitting the frame
+// (empty stdout/stderr, rc 1, permanently — only session_close recovered it).
+// A fresh bash per call deletes that whole bug class; it also removes the
+// host-side queue (one slow command no longer blocks the session) and makes a
+// wedged shell impossible, because nothing long-lived exists to wedge.
 
 import { MickeError } from "./supervisor.js";
 
@@ -36,6 +50,10 @@ const STDERR_MARK = "\n===STDERR===\n";
 const TIMEOUT_MARK = "\n===TIMEOUT===\n";
 const TRUNC_RE = /\n…\[truncated (\d+) bytes\]\n|\n\.\.\.\[truncated (\d+) bytes\]\n$/;
 
+// The wrapper prints CWD_MARK to stderr when it cannot enter the requested
+// directory; the host maps that to a structured CWD_INVALID error.
+const CWD_MARK = "micke: cannot enter cwd: ";
+
 interface Frame {
   stdout: string;
   stderr: string;
@@ -46,6 +64,9 @@ interface Frame {
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+/** What a fresh bash gets anyway (the image's WORKDIR); named so it is explicit. */
+export const DEFAULT_CWD = "/home/agent";
+export const DEFAULT_CONCURRENCY = 8;
 
 function parseFrame(buf: Buffer): Frame | null {
   if (!buf.subarray(0, BEGIN.length).equals(Buffer.from(BEGIN))) {
@@ -73,30 +94,59 @@ function parseFrame(buf: Buffer): Frame | null {
   };
 }
 
-export class ShellChannel {
+/** POSIX single-quote quoting: everything inside is literal. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Validate the optional cwd and return the prompt-free prefix that enters it.
+ * The host must make the command run there; the wire protocol stays untouched,
+ * so a stale image (whose fresh bash starts in /home/agent) still works.
+ * Rejecting newlines/NUL leaves exactly one quoting path (`shellQuote`).
+ */
+function cwdPrefix(raw: string): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new MickeError("BAD_ARGUMENT", "cwd must be a non-empty absolute path", `Omit cwd to use ${DEFAULT_CWD}.`);
+  }
+  if (/[\n\r\0]/.test(raw)) {
+    throw new MickeError("BAD_ARGUMENT", "cwd must not contain newlines or NUL bytes", `Pass one absolute path, e.g. "/tmp".`);
+  }
+  if (!raw.startsWith("/")) {
+    throw new MickeError("BAD_ARGUMENT", `cwd "${raw}" must be an absolute path`, `It runs in the guest, e.g. "/tmp", "/home/agent" or "/workspace".`);
+  }
+  return `cd -- ${shellQuote(raw)} 2>/dev/null || { printf '%s%s\\n' ${shellQuote(CWD_MARK)} ${shellQuote(raw)} >&2; exit 1; }\n`;
+}
+
+/** MICKE_SHELL_CONCURRENCY: default 8, 0 = unlimited, invalid falls back. */
+function concurrencyLimit(): number {
+  const raw = process.env.MICKE_SHELL_CONCURRENCY;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_CONCURRENCY;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_CONCURRENCY;
+  return n;
+}
+
+/**
+ * One short-lived connection: connect, ready handshake, one request, one frame.
+ * Nothing outlives a single run(), and a failure closes the socket immediately
+ * — a retry is simply a new connection.
+ */
+class ShellConnection {
   private socket: Bun.Socket | null = null;
   private buf = Buffer.alloc(0);
   private diag = "";
-  private readyWaiter: (() => void) | null = null;
+  private readyWaiter: { resolve: () => void; reject: (err: Error) => void } | null = null;
   private drainWaiter: (() => void) | null = null;
   private frameWaiter:
     | { resolve: (f: Frame) => void; reject: (err: Error) => void }
     | null = null;
-  private queue: Promise<unknown> = Promise.resolve();
   private dead = false;
 
-  constructor(private port: number) {}
-
-  get alive(): boolean {
-    return !!this.socket && !this.dead;
-  }
+  constructor(private readonly port: number) {}
 
   /** Connect to the in-guest listener and wait for ===SHELL_READY===. */
-  async start(): Promise<void> {
-    if (this.socket) return;
-    this.dead = false;
-    this.diag = "";
-    this.buf = Buffer.alloc(0);
+  async open(): Promise<void> {
     // The driver starts its listener before the desktop finishes booting, but
     // a just-respawned listener can take ~0.5 s: retry briefly.
     let lastErr: unknown;
@@ -119,38 +169,35 @@ export class ShellChannel {
         break;
       } catch (err) {
         lastErr = err;
-        await Bun.sleep(500);
+        if (attempt < 9) await Bun.sleep(500);
       }
     }
     if (!this.socket) {
-      this.die(`connect failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
       throw new MickeError(
         "SHELL_UNAVAILABLE",
         `cannot connect to the session shell on 127.0.0.1:${this.port}`,
-        this.diag || "The sandbox may have exited; check session_list.",
+        `The sandbox may have exited; check session_list. (${lastErr instanceof Error ? lastErr.message : String(lastErr)})`,
       );
     }
     // Set the waiter after the TCP connect resolves: no data can be delivered
     // before this continuation yields, so the ready marker cannot be missed.
-    const ready = new Promise<void>((resolve, reject) => {
-      const t = setTimeout(
-        () => reject(new MickeError("SHELL_UNAVAILABLE", `shell did not initialize on 127.0.0.1:${this.port}`, "The sandbox may have exited; check session_list.")),
-        20_000,
-      );
-      this.readyWaiter = () => {
-        clearTimeout(t);
-        resolve();
-      };
-    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await ready;
-    } catch (err) {
-      this.die("ready marker not received");
-      throw err;
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new MickeError("SHELL_UNAVAILABLE", `shell did not initialize on 127.0.0.1:${this.port}`, "The sandbox may have exited; check session_list.")),
+          20_000,
+        );
+        this.readyWaiter = { resolve, reject };
+      });
+    } finally {
+      clearTimeout(timer);
+      this.readyWaiter = null;
     }
   }
 
   private onData(chunk: Buffer): void {
+    if (this.dead) return;
     this.buf = Buffer.concat([this.buf, chunk]);
     // Consume the per-connection ready marker if pending.
     if (this.readyWaiter) {
@@ -162,7 +209,7 @@ export class ShellChannel {
         ]);
         const w = this.readyWaiter;
         this.readyWaiter = null;
-        w();
+        w.resolve();
       }
     }
     if (this.frameWaiter) this.tryExtract();
@@ -191,7 +238,7 @@ export class ShellChannel {
 
   private async write(s: string): Promise<void> {
     const socket = this.socket;
-    if (!socket) throw new MickeError("SHELL_UNAVAILABLE", "shell is not running", undefined);
+    if (!socket) throw new MickeError("SHELL_UNAVAILABLE", "shell is not connected", undefined);
     const bytes = Buffer.from(s, "utf8");
     let off = 0;
     try {
@@ -209,7 +256,7 @@ export class ShellChannel {
       socket.flush();
     } catch (err) {
       this.die(`write failed: ${err instanceof Error ? err.message : String(err)}`);
-      throw new MickeError("SHELL_UNAVAILABLE", "shell channel died while sending a command", this.diag || undefined);
+      throw new MickeError("SHELL_UNAVAILABLE", "shell connection died while sending a command", this.diag || undefined);
     }
   }
 
@@ -220,11 +267,29 @@ export class ShellChannel {
     const drain = this.drainWaiter;
     this.drainWaiter = null;
     drain?.();
+    const ready = this.readyWaiter;
+    this.readyWaiter = null;
+    ready?.reject(new MickeError("SHELL_UNAVAILABLE", `shell connection died before ready: ${reason}`, this.diag));
     if (this.frameWaiter) {
       const w = this.frameWaiter;
       this.frameWaiter = null;
-      w.reject(new MickeError("SHELL_UNAVAILABLE", `shell channel died: ${reason}`, this.diag));
+      w.reject(new MickeError("SHELL_UNAVAILABLE", `shell connection died: ${reason}`, this.diag));
     }
+    this.closeSocket();
+  }
+
+  close(): void {
+    if (this.dead) return;
+    this.dead = true;
+    const drain = this.drainWaiter;
+    this.drainWaiter = null;
+    drain?.();
+    const ready = this.readyWaiter;
+    this.readyWaiter = null;
+    ready?.reject(new MickeError("SHELL_UNAVAILABLE", "shell connection closed while starting", this.diag || undefined));
+    const frame = this.frameWaiter;
+    this.frameWaiter = null;
+    frame?.reject(new MickeError("SHELL_UNAVAILABLE", "shell connection closed", this.diag || undefined));
     this.closeSocket();
   }
 
@@ -236,39 +301,28 @@ export class ShellChannel {
     try { socket.terminate(); } catch { /* already closed */ }
   }
 
-  /** Run one command. Serialized: one in-flight command per shell. */
-  run(command: string, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = DEFAULT_MAX_OUTPUT_BYTES): Promise<ShellResult> {
-    const task = () => this.runOnce(command, timeoutMs, maxBytes);
-    const next = this.queue.then(task, task);
-    this.queue = next.catch(() => {});
-    return next;
-  }
-
-  private async runOnce(command: string, timeoutMs: number, maxBytes: number): Promise<ShellResult> {
-    if (!this.alive) {
-      throw new MickeError(
-        "SHELL_UNAVAILABLE",
-        `shell on port ${this.port} is not running`,
-        "The session's shell dropped; the next call reconnects with a fresh shell (cwd/env reset).",
-      );
-    }
+  /** Write one request and read exactly one frame. */
+  async request(command: string, timeoutMs: number, maxBytes: number): Promise<ShellResult> {
     const t0 = Date.now();
     const b64 = Buffer.from(command, "utf8").toString("base64");
     const framePromise = new Promise<Frame>((resolve, reject) => {
       this.frameWaiter = { resolve, reject };
     });
+    // If the write below throws, this promise rejects with nobody awaiting it;
+    // the no-op handler keeps that from surfacing as an unhandled rejection.
+    framePromise.catch(() => {});
     await this.write(`__micke_run ${Math.max(0, Math.floor(timeoutMs))} ${Math.max(1, Math.floor(maxBytes))} ${b64}\n`);
     // Host-side backstop: the guest watchdog should fire first; if the frame
-    // never arrives at all, the channel is unusable.
+    // never arrives at all, this connection is unusable (it is closed below).
     const graceMs = Math.max(timeoutMs, 1_000) + 15_000;
-    let frame: Frame;
     let backstop: ReturnType<typeof setTimeout> | undefined;
+    let frame: Frame;
     try {
       frame = await Promise.race([
         framePromise,
         new Promise<never>((_, reject) => {
           backstop = setTimeout(
-            () => reject(new MickeError("SHELL_UNAVAILABLE", `no response after ${graceMs}ms; shell channel killed`, this.diag || undefined)),
+            () => reject(new MickeError("SHELL_UNAVAILABLE", `no response after ${graceMs}ms; shell connection closed`, this.diag || undefined)),
             graceMs,
           );
         }),
@@ -296,17 +350,99 @@ export class ShellChannel {
       durationMs: Date.now() - t0,
     };
   }
+}
 
+/**
+ * A session's shell endpoint. It holds no socket: each run() opens, uses, and
+ * closes its own connection. Parallel runs are allowed up to a bound
+ * (MICKE_SHELL_CONCURRENCY, default 8, 0 = unlimited) because the guest forks
+ * one bash per connection and an unbounded fan-out would be a guest fork bomb.
+ */
+export class ShellChannel {
+  private connections = new Set<ShellConnection>();
+  private active = 0;
+  private waiters: Array<() => void> = [];
+  private readonly limit: number;
+  private dead = false;
+
+  constructor(private readonly port: number, limit = concurrencyLimit()) {
+    this.limit = limit;
+  }
+
+  get alive(): boolean {
+    return !this.dead;
+  }
+
+  async run(
+    command: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    maxBytes = DEFAULT_MAX_OUTPUT_BYTES,
+    cwd = DEFAULT_CWD,
+  ): Promise<ShellResult> {
+    // Validate before queueing: a bad argument fails immediately.
+    const prefix = cwdPrefix(cwd);
+    await this.acquire();
+    let conn: ShellConnection | null = null;
+    try {
+      if (this.dead) {
+        throw new MickeError(
+          "SHELL_UNAVAILABLE",
+          `shell for this session is closed`,
+          "The session was closed; create a new one with session_create.",
+        );
+      }
+      conn = new ShellConnection(this.port);
+      this.connections.add(conn);
+      await conn.open();
+      const result = await conn.request(prefix + command, timeoutMs, maxBytes);
+      if (result.rc !== 0 && result.stderr.startsWith(CWD_MARK)) {
+        throw new MickeError(
+          "CWD_INVALID",
+          `cwd "${cwd}" does not exist in the guest (or is not a directory)`,
+          `cwd must be an absolute path inside the sandbox, e.g. "/tmp", "/home/agent" or "/workspace".`,
+        );
+      }
+      return result;
+    } finally {
+      if (conn) {
+        this.connections.delete(conn);
+        conn.close();
+      }
+      this.release();
+    }
+  }
+
+  // ---- bounded concurrency ------------------------------------------------
+  //
+  // Exceeding the cap queues (no failure): run() awaits a slot. A released slot
+  // is handed straight to the oldest waiter, so `active` never overshoots.
+
+  private acquire(): Promise<void> | null {
+    if (this.limit === 0 || this.active < this.limit) {
+      this.active++;
+      return null;
+    }
+    return new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  private release(): void {
+    if (this.dead) return; // kill() already reset the counters
+    const next = this.waiters.shift();
+    if (next) {
+      next(); // slot transferred; `active` is unchanged
+      return;
+    }
+    this.active--;
+  }
+
+  /** Close in-flight connections. There is no long-lived socket to tear down. */
   kill(): void {
     this.dead = true;
-    if (this.frameWaiter) {
-      const w = this.frameWaiter;
-      this.frameWaiter = null;
-      w.reject(new MickeError("SHELL_UNAVAILABLE", "shell channel closed", this.diag || undefined));
-    }
-    const drain = this.drainWaiter;
-    this.drainWaiter = null;
-    drain?.();
-    this.closeSocket();
+    for (const conn of this.connections) conn.close();
+    this.connections.clear();
+    // Wake queued runs: they observe `dead` and fail fast instead of hanging.
+    const queued = this.waiters.splice(0);
+    this.active = 0;
+    for (const wake of queued) wake();
   }
 }

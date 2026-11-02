@@ -87,7 +87,7 @@ let closing = false;
 async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
-  console.error(`micke: ${signal}, killing shell channels (sandboxes survive; the next start adopts them)`);
+  console.error(`micke: ${signal}, closing in-flight shell connections (sandboxes survive; the next start adopts them)`);
   server.stop(true);
   await sup.shutdown();
   process.exit(0);

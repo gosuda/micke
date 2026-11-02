@@ -19,13 +19,14 @@ const CREATE_DESC = [
 ].join(" ");
 
 const SHELL_DESC = [
-  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, then locate a target with ONE filtered snapshot: `agent-desktop snapshot --app chromium -i --compact | jq -r '.. | objects | select(.role?==\"link\") | [.ref_id,.name] | @tsv'` (filter IN the command — full trees are large), then `agent-desktop click \"@<snapshot>:REF\"` and `agent-desktop wait --window TITLE --app chromium`. `micke-find <substring> [--role R]` is the shortcut for that one-liner. Prefer the snapshot recipe to `agent-desktop find`: find needs `--first` and then still spends its whole budget. If a snapshot receipt says `truncated:true`, retry once at a higher `--timeout-ms`.",
+  "Run bash in the session. EVERY call is a fresh, independent bash: cwd and exported env do NOT persist from one call to the next (`cd /tmp` or `export FOO=bar` in one call is gone by the next). Make each call self-contained — `cd /tmp && ls`, `PATH=/x:$PATH cmd`, `FOO=bar cmd` — or pass `cwd` to start in another absolute directory (default /home/agent; a missing directory fails with CWD_INVALID). The desktop env (DISPLAY, D-Bus, AT-SPI) is already sourced in every fresh bash, so agent-desktop and micke-chromium work with no setup.",
+  "Drive the desktop: `micke-chromium <url>`, then locate a target with ONE filtered snapshot: `agent-desktop snapshot --app chromium -i --compact | jq -r '.. | objects | select(.role?==\"link\") | [.ref_id,.name] | @tsv'` (filter IN the command — full trees are large), then `agent-desktop click \"@<snapshot>:REF\"` and `agent-desktop wait --window TITLE --app chromium`. `micke-find <substring> [--role R]` is the shortcut for that one-liner. Prefer the snapshot recipe to `agent-desktop find`: find needs `--first` and then still spends its whole budget. If a snapshot receipt says `truncated:true`, retry once at a higher `--timeout-ms`.",
   "Verify cheaply with `micke-state`: one line of JSON {\"alive\",\"title\",\"url\",\"refs\"} from the a11y tree, no files, ~2 s. It answers \"is the browser alive\" and \"did the click/navigation land\" — gate on a changed window title or URL, or a moved ref count; exit 1 means no chromium window. A dead browser is otherwise silent: `list-apps`/`list-windows` return `[]`, `screenshot` still succeeds, and `session_list` still says `ready` — gate on `micke-state`. `agent-desktop press` can SIGSEGV chromium on this image (rc 139): send keys with `micke-key <combo>` instead, and relaunch with `micke-chromium <url>` after a death.",
   "Take a screenshot ONLY when a human must see it: they asked for one, the answer exists only in pixels, or you are reporting a visual defect. Never screenshot to verify a click — nothing consumes the PNG; verify with window title / URL / ref_count instead. Write any screenshot to /workspace so it lands on the host.",
   "For page CONTENT (reading, headlines, article text) use `micke-page-text <url> [--links]` — headless dump-dom -> small JSON. Heavy pages truncate the a11y tree; don't snapshot what you only need to read.",
   "`agent-desktop` exits non-zero when its JSON envelope reports ok:false, so `set -e` and `&&` are trustworthy; read the envelope for the error code.",
+  "Calls run in parallel up to a per-session cap (default 8, MICKE_SHELL_CONCURRENCY; beyond it they queue briefly), so a long command no longer blocks the session. A crash in one call cannot wedge the next: there is no persistent shell to wedge.",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
-  "A dropped channel is recoverable: the next call reconnects with a fresh shell (cwd/env reset).",
 ].join(" ");
 
 const TOOLS = [
@@ -48,7 +49,7 @@ const TOOLS = [
   },
   {
     name: "session_close",
-    description: "Tear a session down: kills its shell channel and its rungv sandbox (SIGTERM, then SIGKILL), and deletes the pidfile. Also reaps orphaned sessions.",
+    description: "Tear a session down: closes its in-flight shell connections and its rungv sandbox (SIGTERM, then SIGKILL), and deletes the pidfile. Also reaps orphaned sessions.",
     inputSchema: {
       type: "object" as const,
       properties: { session_id: { type: "string", description: "Session id from session_create/session_list." } },
@@ -62,8 +63,9 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         session_id: { type: "string", description: "Session id from session_create." },
-        command: { type: "string", description: "Bash command string (may be multi-line)." },
-        timeout_ms: { type: "integer", description: "Kill the command (not the shell) after this many ms. Default 120000; 0 disables." },
+        command: { type: "string", description: "Bash command string (may be multi-line). Runs in a fresh bash; nothing it changes persists to later calls." },
+        cwd: { type: "string", description: 'Absolute guest directory to run the command in (default "/home/agent"). It never persists to later calls; a nonexistent directory fails with CWD_INVALID.' },
+        timeout_ms: { type: "integer", description: "Kill the command (not the session) after this many ms. Default 120000; 0 disables." },
         max_output_bytes: { type: "integer", description: "Per-stream output cap in bytes (default 262144). Output beyond it is truncated with a `…[truncated N bytes]` marker." },
       },
       required: ["session_id", "command"],
@@ -138,6 +140,7 @@ export function registerTools(server: Server, sup: Supervisor): void {
             str(args.command, "command"),
             int(args.timeout_ms, "timeout_ms"),
             int(args.max_output_bytes, "max_output_bytes"),
+            args.cwd !== undefined ? str(args.cwd, "cwd") : undefined,
           );
           return ok({
             session_id: args.session_id,

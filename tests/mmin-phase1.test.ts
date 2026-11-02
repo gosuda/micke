@@ -3,10 +3,12 @@
 // On this host (gvx + a cached micke image): starts the real daemon as a
 // subprocess (kernel-picked port), talks MCP over Streamable HTTP, and walks
 // the core loop: create -> noVNC URL (HTTP 200) -> shell (a11y granted,
-// chromium, snapshot refs, persistence, output cap, timeout-kill) -> workspace
-// bind -> close -> rungv/pidfile gone -> list reflects everything. The final
-// block kills the daemon, restarts it, and proves ADOPTION: the desktop
-// survives and a fresh shell re-attaches to the still-booted chromium.
+// chromium, snapshot refs, statelessness/PATH regression, output cap,
+// timeout-kill) -> workspace bind -> close -> rungv/pidfile gone -> list
+// reflects everything. The full stateless contract (concurrency, nohup,
+// cwd:) lives in tests/stateless-shell.test.ts. The final block kills the
+// daemon, restarts it, and proves ADOPTION: the desktop survives and a fresh
+// shell re-attaches to the still-booted chromium.
 //
 // Run: bun test tests/mmin-phase1.test.ts
 
@@ -64,7 +66,7 @@ afterAll(async () => {
 }, 60_000);
 
 test(
-  "M-min phase 1: supervisor + 4 tools + persistent shell + adoption, end to end",
+  "M-min phase 1: supervisor + 4 tools + stateless shell + adoption, end to end",
   async () => {
     // --- 1. session_create: ready + novnc_url --------------------------------
     const tCreate = Date.now();
@@ -115,23 +117,64 @@ test(
     })).stdout);
     expect(wait.data.found).toBe(true);
 
-    const snap = JSON.parse((await call("session_shell", {
-      session_id: a.session_id,
-      command: "agent-desktop snapshot --app chromium -i --compact",
-      timeout_ms: 60_000,
-      max_output_bytes: 1_048_576,
-    })).stdout);
-    console.log(`snapshot -> ref_count=${snap.data.ref_count}`);
+    // The a11y tree is still settling right after the window appears: the
+    // first snapshot can carry only browser chrome (no page content) before the
+    // page subtree is exposed. Retry up to 3x and require the page's own
+    // content in the tree — a broken page/browser still fails every attempt.
+    let snap: any;
+    let pageContent = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      snap = JSON.parse((await call("session_shell", {
+        session_id: a.session_id,
+        command: "agent-desktop snapshot --app chromium -i --compact",
+        timeout_ms: 60_000,
+        max_output_bytes: 1_048_576,
+      })).stdout);
+      pageContent = false;
+      let linkName = "";
+      const walk = (n: any) => {
+        if (!n) return;
+        // `-i` keeps interactive elements, so the page's own link is the page
+        // signal; browser chrome carries no links.
+        if (String(n.role ?? "") === "link" && String(n.name ?? "").trim() !== "") {
+          pageContent = true;
+          linkName = String(n.name);
+        }
+        for (const ch of n.children ?? []) walk(ch);
+      };
+      walk(snap.data.tree);
+      console.log(`snapshot[${attempt}] -> ref_count=${snap.data.ref_count} page_link=${JSON.stringify(linkName)}`);
+      if (pageContent) break;
+      await Bun.sleep(1_000);
+    }
     expect(snap.ok).toBe(true);
-    expect(snap.data.ref_count).toBeGreaterThan(50);
+    expect(pageContent).toBe(true); // the page itself is in the a11y tree
 
-    // --- 5. shell: cwd + exported env persist --------------------------------
+    // --- 5. shell: stateless touch-points -----------------------------------
+    // The full contract lives in tests/stateless-shell.test.ts (one session).
+    // Here: the two properties that shape every agent call — no cwd/env
+    // carry-over, and the old PATH-replay bug cannot poison the next call.
     await call("session_shell", { session_id: a.session_id, command: "cd /tmp && export MICKE_FOO=bar" });
     const p1 = await call("session_shell", { session_id: a.session_id, command: "pwd" });
-    const p2 = await call("session_shell", { session_id: a.session_id, command: "echo $MICKE_FOO" });
-    console.log(`persistence -> pwd=${p1.stdout.trim()} FOO=${p2.stdout.trim()}`);
-    expect(p1.stdout.trim()).toBe("/tmp");
-    expect(p2.stdout.trim()).toBe("bar");
+    const p2 = await call("session_shell", {
+      session_id: a.session_id,
+      command: 'echo "${MICKE_FOO:-unset}"',
+    });
+    expect(p1.stdout.trim()).toBe("/home/agent");
+    expect(p2.stdout.trim()).toBe("unset");
+
+    // The removed wrapper replayed exported env into a long-lived bash and
+    // unset changed vars before resolving comm/grep/sed through PATH, so this
+    // left PATH=[] and every later call died at mktemp (empty frame, rc 1).
+    const poison = await call("session_shell", {
+      session_id: a.session_id,
+      command: "export PATH=/nonexistent",
+    });
+    expect(poison.rc).toBe(0);
+    const afterPath = await call("session_shell", { session_id: a.session_id, command: "echo ok" });
+    console.log(`PATH regression -> rc=${afterPath.rc} stdout=${JSON.stringify(afterPath.stdout)}`);
+    expect(afterPath.rc).toBe(0);
+    expect(afterPath.stdout.trim()).toBe("ok");
 
     // --- 6. shell: output cap with explicit marker ---------------------------
     const big = await call("session_shell", {
@@ -146,36 +189,30 @@ test(
     expect(parseInt(cut![1], 10)).toBe(400000 - 65_536); // 334464
     expect(big.stdout.length).toBeLessThanOrEqual(65_536 + 64);
 
-    // --- 7. shell: timeout kills the command, never the shell ----------------
+    // --- 7. shell: timeout kills the command, leaves no stray process ---------
     const t0 = Date.now();
     const timed = await call("session_shell", {
       session_id: a.session_id,
-      command: "sleep 30",
-      timeout_ms: 2_000,
+      command: "sleep 300",
+      timeout_ms: 1_000,
     });
     const timeoutMs = Date.now() - t0;
     console.log(`timeout -> rc=${timed.rc} timed_out=${timed.timed_out} wall=${timeoutMs}ms`);
     expect(timed.timed_out).toBe(true);
     expect(timed.rc).not.toBe(0);
-    expect(timeoutMs).toBeGreaterThan(1_800);
+    expect(timeoutMs).toBeGreaterThan(800);
     expect(timeoutMs).toBeLessThan(8_000);
+    await Bun.sleep(300); // the watchdog's KILL escalation needs a beat
+    const strays = await call("session_shell", {
+      session_id: a.session_id,
+      command: "pgrep -f 'sleep 300' | wc -l",
+    });
+    console.log(`timeout strays -> ${JSON.stringify(strays.stdout.trim())}`);
+    expect(strays.stdout.trim()).toBe("0");
 
     const alive = await call("session_shell", { session_id: a.session_id, command: "echo alive" });
     expect(alive.rc).toBe(0);
     expect(alive.stdout.trim()).toBe("alive");
-
-    // --- 7b. dropped channel self-heals: kill the guest bash, next call reconnects ---
-    const drop = await call("session_shell", {
-      session_id: a.session_id,
-      command: "(sleep 0.3; kill -9 $$) >/dev/null 2>&1 & echo dropping",
-    });
-    expect(drop.stdout.trim()).toBe("dropping");
-    await Bun.sleep(1_000);
-    const reconnected = await call("session_shell", { session_id: a.session_id, command: "pwd; echo reconnected" });
-    console.log(`reconnect -> pwd=${reconnected.stdout.trim().split("\n")[0]} rc=${reconnected.rc}`);
-    expect(reconnected.rc).toBe(0);
-    expect(reconnected.stdout).toContain("reconnected");
-    expect(reconnected.stdout.split("\n")[0]).toBe("/home/agent"); // fresh bash, cwd reset
 
     // --- 8. list reflects the live session ------------------------------------
     let rows = (await call("session_list")).sessions;
@@ -256,7 +293,7 @@ test(
     // --- 13. daemon death + adoption: the desktop outlives the supervisor -----
     // Create + launch chromium, SIGKILL the daemon, restart on the same state
     // dir: the pidfile's pid+ports are enough to ADOPT the still-running
-    // sandbox. A fresh shell re-attaches (fresh bash: cwd/env reset), and the
+    // sandbox. A fresh bash re-attaches (stateless: default cwd/env), and the
     // chromium window from before the crash is still there.
     const c = await call("session_create");
     created.push(c.session_id);

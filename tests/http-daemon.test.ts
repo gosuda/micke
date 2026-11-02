@@ -1,10 +1,11 @@
 // tests/http-daemon.test.ts — daemon-shape verification (design §7 a/b):
 // (a) disconnect survival — a client going away is just a dropped TCP
-//     connection: the daemon, sessions, and shell channels don't notice, and
+//     connection: the daemon, sessions, and shell endpoints don't notice, and
 //     a fresh client picks the same session right up;
 // (b) two clients, one shared session — concurrent session_shell calls from
-//     two clients serialize on the session's shell queue: both succeed,
-//     stdout is exact (no interleave), and both see the same session_list row.
+//     two clients run in independent fresh bashes (no shared shell state, no
+//     queue): both succeed, stdout is exact (one frame per connection), and
+//     both see the same session_list row.
 // (The adoption case — daemon killed, sandbox survives, next daemon
 // re-attaches — is covered by tests/mmin-phase1.test.ts §13.)
 //
@@ -67,23 +68,24 @@ test("disconnect survival: client A leaves, fresh client B drives the same sessi
   await b.close();
 }, 120_000);
 
-test("two clients, one session: concurrent shells serialize; both see the same row", async () => {
+test("two clients, one session: concurrent shells are independent; both see the same row", async () => {
   const a = await daemon.connect("micke-daemon-tc-a");
   const b = await daemon.connect("micke-daemon-tc-b");
   const s = await call(a, "session_create");
   created.push(s.session_id);
-  // Open the (lazy) shell once up front, then race two clients on the
-  // already-open channel — the per-session queue is the contract under test.
+  // Every call opens its own connection, so there is no channel to warm: the
+  // two calls below run in independent fresh bashes.
   const warm = await call(a, "session_shell", { session_id: s.session_id, command: "echo ready" });
   expect(warm.rc).toBe(0);
 
+  const t0 = Date.now();
   const [ra, rb] = await Promise.all([
-    call(a, "session_shell", { session_id: s.session_id, command: "sleep 0.3; echo A" }),
+    call(a, "session_shell", { session_id: s.session_id, command: "sleep 1; echo A" }),
     call(b, "session_shell", { session_id: s.session_id, command: "echo B" }),
   ]);
-  console.log(`concurrent -> A rc=${ra.rc} stdout=${JSON.stringify(ra.stdout)} | B rc=${rb.rc} stdout=${JSON.stringify(rb.stdout)}`);
+  console.log(`concurrent -> A rc=${ra.rc} stdout=${JSON.stringify(ra.stdout)} | B rc=${rb.rc} stdout=${JSON.stringify(rb.stdout)} in ${Date.now() - t0}ms`);
   expect(ra.rc).toBe(0);
-  expect(ra.stdout).toBe("A\n"); // exact output = no interleave
+  expect(ra.stdout).toBe("A\n"); // one frame per connection = no interleave
   expect(rb.rc).toBe(0);
   expect(rb.stdout).toBe("B\n");
 
