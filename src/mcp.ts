@@ -13,12 +13,15 @@ import { MickeError, type Supervisor } from "./supervisor.js";
 
 const CREATE_DESC = [
   "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
+  "A host workspace is always mounted at /workspace: pass an absolute existing path, or omit it and micke creates one beside the pidfile — the receipt's `workspace` is where artifacts written to /workspace land on the host.",
   "Open chromium with `micke-chromium <url>` (required flags pre-baked); open novnc_url in a browser to watch or take over the desktop.",
   "Then run ALL commands through session_shell on that session_id — env is pre-sourced, `agent-desktop` works directly.",
 ].join(" ");
 
 const SHELL_DESC = [
-  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, `agent-desktop snapshot --app chromium -i --compact` (filter with grep/jq IN the command — trees are large), `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`, `agent-desktop screenshot /workspace/x.png`.",
+  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, `agent-desktop snapshot --app chromium -i --compact` (filter with grep/jq IN the command — trees are large), `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`, `agent-desktop screenshot /workspace/x.png` (lands on the host workspace).",
+  "For page CONTENT (reading, headlines, article text) use `micke-page-text <url> [--links]` — headless dump-dom -> small JSON. Heavy pages time out the a11y tree; don't snapshot what you only need to read.",
+  "`agent-desktop` exits non-zero when its JSON envelope reports ok:false, so `set -e` and `&&` are trustworthy; read the envelope for the error code.",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
   "A dropped channel is recoverable: the next call reconnects with a fresh shell (cwd/env reset).",
 ].join(" ");
@@ -31,7 +34,7 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         image: { type: "string", description: "OCI image (default ghcr.io/gosuda/micke:latest, override with MICKE_IMAGE). Pulled with rungv if missing while no sessions are live." },
-        workspace: { type: "string", description: "Optional absolute host directory bind-mounted at /workspace (repo in, artifacts out)." },
+        workspace: { type: "string", description: "Optional absolute host directory bind-mounted at /workspace. Omit it and micke creates <MICKE_STATE_DIR>/workspaces/<session_id>; the receipt always reports the host path." },
         screen: { type: "string", description: 'Xvfb screen size WIDTHxHEIGHTxDEPTH (default "1280x800x24").' },
       },
     },

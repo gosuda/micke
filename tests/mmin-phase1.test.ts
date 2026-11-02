@@ -174,6 +174,17 @@ test(
     expect(rowA?.novnc_url).toBe(a.novnc_url);
 
     // --- 9. workspace bind: write inside, appears on host --------------------
+    // Default (no `workspace` argument): the receipt still carries a host dir,
+    // so artifacts are retrievable without a base64 round-trip.
+    expect(a.workspace).toBeTruthy();
+    expect(existsSync(a.workspace)).toBe(true);
+    await call("session_shell", {
+      session_id: a.session_id,
+      command: "echo default-workspace > /workspace/default.txt",
+    });
+    expect(readFileSync(join(a.workspace, "default.txt"), "utf8")).toBe("default-workspace\n");
+    console.log(`default workspace -> host read from ${a.workspace}/default.txt`);
+
     const ws = mkdtempSync(join(tmpdir(), "micke-ws-"));
     const b = await call("session_create", { workspace: ws });
     created.push(b.session_id);

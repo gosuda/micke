@@ -108,6 +108,22 @@ Every created session reports a
 and the daemon serves a static, no-JS session table at
 `http://127.0.0.1:7800/` (auto-refreshing; guards: instance lock, free-RAM
 floor, serialized image pulls).
+
+A host workspace is **always** mounted at `/workspace`: pass an absolute path
+to `session_create`, or omit it and micke creates
+`$MICKE_STATE_DIR/workspaces/<session_id>` and reports it as `workspace`.
+Artifacts (screenshots, downloads, dumps) written there are already on the
+host — no base64 through the shell channel. Files are kept after
+`session_close`; delete the directory when you are done with it.
+
+Two additions make the shell agent-friendly:
+
+- `agent-desktop` exits **non-zero** when its JSON envelope says `ok:false`
+  (shimmed in the image), so `set -e` and `&&` are trustworthy.
+- `micke-page-text <url>` reads a page as small JSON (`{title,text,links}`)
+  via headless chromium. Use it for content; use the AT-SPI tree for
+  interaction — heavy pages time out the tree.
+
 See [docs/server-internals.md](docs/server-internals.md) for configuration,
 the shell-channel protocol, adoption semantics, and the integration tests
 (`bun test tests/`).

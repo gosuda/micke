@@ -54,7 +54,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g agent-desktop && agent-desktop version
+# Install under its own prefix: the real CLI keeps its npm symlinks and the
+# bundled native helper, while /usr/local/bin/agent-desktop is the shim below.
+RUN mkdir -p /opt/agent-desktop \
+    && npm install -g --prefix /opt/agent-desktop agent-desktop \
+    && /opt/agent-desktop/bin/agent-desktop version
 
 # agent-desktop's state root (~/.agent-desktop, mode 0700) and the session
 # bus are per-user; never run the desktop as root.
@@ -72,6 +76,17 @@ RUN chmod 0755 /usr/local/bin/micke-driver
 # Preferred chromium launch path: flags pre-baked (see micke-chromium.sh).
 COPY image/micke-chromium.sh /usr/local/bin/micke-chromium
 RUN chmod 0755 /usr/local/bin/micke-chromium
+
+# agent-desktop shim: `ok:false` in the JSON envelope becomes exit 1, so agents
+# that gate on `$?` (set -e, &&) never proceed on a silent failure.
+COPY image/agent-desktop-shim.sh /usr/local/bin/agent-desktop
+RUN chmod 0755 /usr/local/bin/agent-desktop
+
+# Content path for real pages (headless dump-dom -> small JSON). Interaction
+# still goes through the AT-SPI tree; heavy pages time it out.
+COPY image/page-text.sh /usr/local/bin/micke-page-text
+COPY image/page_text.py /usr/local/lib/micke/page_text.py
+RUN chmod 0755 /usr/local/bin/micke-page-text && chmod 0644 /usr/local/lib/micke/page_text.py
 
 USER $USERNAME
 WORKDIR /home/$USERNAME

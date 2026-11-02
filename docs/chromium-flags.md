@@ -130,11 +130,10 @@ agent-desktop wait --window "Example Domains" --app chromium --timeout 15000
 
 # 6. evidence out: `agent-desktop screenshot` returns a base64 PNG in the JSON
 #    envelope (`data.data`) (verified: 1280x800 png, 136,940 base64 chars ->
-#    102,705 bytes); give it a PATH and it writes the file instead — with a
-#    workspace bind the png lands straight on the HOST (verified:
-#    /workspace/screenshot.png showed up in the host-side bind dir), no base64
-#    dance.
-agent-desktop screenshot /workspace/evidence.png   # needs the workspace bind
+#    102,705 bytes); give it a PATH and it writes the file instead — /workspace
+#    is ALWAYS a host bind (auto-created when session_create gets no
+#    workspace), so the png lands straight on the HOST, no base64 dance.
+agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
 ```
 
 Habits that keep the loop honest:
@@ -206,3 +205,60 @@ agent-desktop snapshot --app chromium -i --compact | grep -o '"name":"[^"]*"'
 
 If you genuinely need the whole tree, raise `max_output_bytes` for that one
 call — but a filter is usually what you actually wanted.
+
+## Content vs. interaction: `micke-page-text`
+
+The AT-SPI tree is the **interaction** path (snapshot → act on `@ref`). It is
+not a content extractor: on a real news page, `agent-desktop find --role link`
+returns `TIMEOUT / locator_incomplete` because the traversal budget runs out
+before the tree does. If you only need to *read* a page, do not snapshot it.
+
+```bash
+# one small JSON object: {url,title,text,chars,truncated}
+micke-page-text https://example.com | jq -r .text
+
+# headlines/links: [{text,href}, ...]
+micke-page-text https://news.google.com --links | jq -r '.links[].text'
+
+# cap the payload for a chatty page
+micke-page-text https://example.com --max-chars 5000 --pretty
+```
+
+How it works: headless chromium renders the URL in a throwaway
+`--user-data-dir` (so it never attaches to the GUI chromium on `:99`), and
+`image/page_text.py` (stdlib python3) extracts title, block-ordered text, and
+links. The multi-megabyte DOM never crosses the `session_shell` output cap —
+only the extracted JSON does.
+
+Use both paths together: `micke-page-text` to find *what* is on the page,
+a11y `snapshot`/`click` to *act* on it.
+
+## Exit codes: `ok:false` is a failure
+
+`agent-desktop` reports application-level failures inside a successful process:
+
+```json
+{"version":"2.5","ok":false,"error":{"code":"TIMEOUT", ...}}   # used to be rc 0
+```
+
+The image ships `/usr/local/bin/agent-desktop`, a shim over the npm-installed
+CLI (`/opt/agent-desktop/bin/agent-desktop`) that exits 1 whenever the JSON
+envelope says `ok:false`. Stdout is byte-identical, so `| jq` pipelines are
+unaffected; process-level non-zero codes and non-JSON output pass through
+untouched. Consequence: `set -e`, `&&`, and `if agent-desktop ...` are now
+trustworthy — but read the envelope for the error code, since exit 1 alone
+does not say *which* failure.
+
+## Workspaces are always mounted
+
+`session_create` without `workspace` still gets a host directory: micke creates
+one under `<MICKE_STATE_DIR>/workspaces/<session_id>` and reports it as
+`workspace` in the receipt. Everything written to `/workspace` in the guest
+lands there on the host, so screenshots and dumps need no base64 round-trip:
+
+```bash
+agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
+```
+
+Workspace files are kept after `session_close` (they are the evidence trail);
+delete the directory when you no longer need it.

@@ -13,15 +13,27 @@
 #   micke-chromium https://example.com   # ...at a URL
 #   micke-chromium URL --arg=<flag> ...  # ...plus extra chromium flags,
 #                                        #   e.g. --arg=--load-extension=/tmp/x
+#   micke-chromium --help                # this text; never launches a browser
 #
 # The session shell auto-sources /tmp/session.env, so this works directly
 # from session_shell. See docs/chromium-flags.md for the driving loop.
 
 set -eu
 
+usage() {
+    sed -n '11,18p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
 url=""
 case "${1:-}" in
+    -h|--help) usage ;;
     ""|--arg=*) ;;        # no URL given (bare call, or flags come first)
+    -*)                   # a stray flag would otherwise become the URL and
+                          # leave chromium running forever (e.g. --help)
+        echo "micke-chromium: unknown flag '$1' (extra chromium flags go as --arg=--x)" >&2
+        exit 2
+        ;;
     *) url="$1"; shift ;; # first non --arg= word is the URL
 esac
 

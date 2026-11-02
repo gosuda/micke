@@ -114,6 +114,15 @@ export class Supervisor {
 
     const id = randId();
     const hostname = `micke-${id}`;
+    // No workspace requested? Hand back one anyway: artifacts (screenshots,
+    // downloads, dumps) must be retrievable from the host without pushing
+    // base64 through session_shell's 256 KiB cap. It lives beside the pidfile,
+    // so MICKE_STATE_DIR / XDG_STATE_HOME governs its lifetime. Explicit
+    // workspaces are validated by createSession and never rewritten.
+    if (workspace === null) {
+      workspace = join(this.stateDir, "workspaces", id);
+      mkdirSync(workspace, { recursive: true });
+    }
     // The child's stdout/stderr go to a REAL FILE, not a pipe: rungv outlives a
     // crashed daemon, and a pipe whose reader died would make the guest's next
     // log write kill the listener (defeating adoption). The file also gives
