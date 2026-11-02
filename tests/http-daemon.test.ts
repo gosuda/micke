@@ -5,8 +5,8 @@
 // (b) two clients, one shared session — concurrent session_shell calls from
 //     two clients serialize on the session's shell queue: both succeed,
 //     stdout is exact (no interleave), and both see the same session_list row.
-// (The orphan re-attach case (c) is deferred to the gvx runtime swap —
-// docs/research/gvx-only-analysis.md §10.)
+// (The adoption case — daemon killed, sandbox survives, next daemon
+// re-attaches — is covered by tests/mmin-phase1.test.ts §13.)
 //
 // Run: bun test tests/http-daemon.test.ts
 
@@ -15,17 +15,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnDaemon, type Daemon } from "./helpers.js";
+import { ensureImage, spawnDaemon, type Daemon } from "./helpers.js";
 
 let daemon: Daemon;
 let stateDir: string;
 const created: string[] = []; // session ids created by this run (cleanup safety)
-
-async function sh(args: string[]): Promise<{ rc: number; stdout: string }> {
-  const proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  return { rc: await proc.exited, stdout };
-}
 
 async function call<T = any>(client: Client, name: string, args: Record<string, unknown> = {}): Promise<T> {
   const res: any = await client.callTool({ name, arguments: args });
@@ -35,15 +29,10 @@ async function call<T = any>(client: Client, name: string, args: Record<string, 
 }
 
 beforeAll(async () => {
-  // Test image policy: micke:latest is the default; retag the verified local image.
-  const tags = await sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]);
-  if (!tags.stdout.includes("micke:latest")) {
-    expect(tags.stdout).toContain("micke:novnc");
-    expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
-  }
+  await ensureImage();
   stateDir = mkdtempSync(join(tmpdir(), "micke-test-daemon-"));
   daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
-}, 60_000);
+}, 600_000);
 
 afterAll(async () => {
   // Any session left behind (test failed midway): reap it through a fresh client.

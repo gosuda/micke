@@ -17,10 +17,11 @@
 # session stays up, the failure lands in /tmp/x11vnc.log or /tmp/novnc.log,
 # and the ready line reports the actual state.
 #
-# The bus environment is published to /tmp/session.env; source it in any
-# later `docker exec` shell before running agent-desktop:
+# The bus environment is published to /tmp/session.env; the gvx shell handler
+# (image/driver.sh) sources it automatically, so agent-desktop works directly.
+# For a manual check inside a session:
 #
-#   docker exec micke bash -c '. /tmp/session.env && agent-desktop status'
+#   . /tmp/session.env && agent-desktop status
 #
 # Modeled on agent-desktop's own container smoke test
 # (scripts/linux-container-smoke.sh in vercel-labs/agent-desktop).
@@ -58,7 +59,7 @@ if [ "${1:-}" = "--desktop" ]; then
 
     # Remote view (non-fatal). Both listeners bind all interfaces inside
     # the sandbox on fixed ports; host exposure is the runtime's job
-    # (-p in Docker, -p in rungv).
+    # (rungv -p, recorded in the session pidfile).
     vnc_state="down" novnc_state="down"
     if command -v x11vnc >/dev/null 2>&1; then
         if [ -n "${MICKE_VNC_PASSWORD:-}" ]; then

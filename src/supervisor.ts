@@ -1,16 +1,18 @@
-// supervisor — one process owning N micke sessions (Docker containers).
+// supervisor — one process owning N micke sessions (gvx sandboxes).
 //
-// A session is a labeled container (`--label micke.session=<id>`) plus a lazy
-// long-lived shell channel. Persistent state lives under the XDG state dir so a
-// restarted supervisor can discover containers from previous runs (listed as
-// `orphaned`; reaped via session_close). All failures surface as MickeError
-// with one JSON shape: {code, message, hint}.
+// A session is ONE foreground `rungv run` child plus a lazy TCP shell channel
+// into the guest's socket driver. Identity is the per-session pidfile under
+// <state>/sessions/<id>.json (gvx has no labels, ps, or daemon state): it
+// records the rungv pid and both host ports, survives daemon death, and lets
+// the next daemon adopt still-running sandboxes.
+//
+// Every failure surfaces as MickeError with one JSON shape: {code, message, hint}.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, writeSync, closeSync, ftruncateSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, openSync, readSync, statSync, writeSync, closeSync, ftruncateSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { dlopen } from "bun:ffi";
-import * as io from "./dockerio.js";
+import * as io from "./gvxio.js";
 import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from "./shell.js";
 
 // flock(2) via FFI: the kernel releases the lock when this process dies, so a
@@ -18,11 +20,12 @@ import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from "./sh
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const flock: ((fd: number, op: number) => number) | null = (() => {
-  try {
-    return dlopen("libc.so.6", { flock: { args: ["i32", "i32"], returns: "i32" } }).symbols.flock;
-  } catch {
-    return null; // non-Linux / no libc — no lock (micke targets Linux hosts)
+  for (const lib of ["libc.so.6", "libSystem.B.dylib"]) {
+    try {
+      return dlopen(lib, { flock: { args: ["i32", "i32"], returns: "i32" } }).symbols.flock;
+    } catch { /* try the next libc */ }
   }
+  return null; // no libc — run without the lock (micke targets Linux/macOS)
 })();
 
 export class MickeError extends Error {
@@ -43,54 +46,40 @@ export interface SessionRow {
   status: "ready" | "orphaned";
   image: string;
   novnc_url: string | null;
-  container_id: string;
-  container_name: string;
+  rungv_pid: number;
+  hostname: string;
   workspace: string | null;
   screen: string;
   created_at: number;
   uptime_seconds: number;
 }
 
-interface SessionState {
-  session_id: string;
-  container_id: string;
-  container_name: string;
-  image: string;
-  novnc_port: number | null;
-  workspace: string | null;
-  screen: string;
-  created_at: number;
-}
-
-interface LiveSession extends SessionState {
+interface LiveSession extends io.SessionRecord {
   shell: ShellChannel | null;
+  shellReady: Promise<ShellChannel> | null;
+  child: io.SessionProcess | null;
 }
-
-const DEFAULT_IMAGE = "micke:latest";
-const DEFAULT_SCREEN = "1280x800x24";
-const READY_LINE = "micke: desktop ready";
 
 const randId = () =>
   Array.from({ length: 8 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 
 export class Supervisor {
   private sessions = new Map<string, LiveSession>();
-  private orphanStates = new Map<string, SessionState>();
-  private stateFile: string;
+  private orphanStates = new Map<string, io.SessionRecord>();
+  private stateDir: string;
   private bootLock: Promise<void> = Promise.resolve();
   private lockFd: number | null = null;
 
   constructor() {
-    const base = process.env.MICKE_STATE_DIR
+    this.stateDir = process.env.MICKE_STATE_DIR
       ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "micke");
-    mkdirSync(base, { recursive: true });
-    this.stateFile = join(base, "sessions.json");
+    mkdirSync(this.stateDir, { recursive: true });
+    mkdirSync(io.sessionsDir(this.stateDir), { recursive: true });
   }
 
   async start(): Promise<void> {
     await this.acquireLock();
-    this.loadState();
-    await this.scanOrphans();
+    this.adoptSessions();
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -101,8 +90,8 @@ export class Supervisor {
   // then all proceed.
 
   async createSession(opts: { image?: string; workspace?: string; screen?: string }): Promise<SessionRow> {
-    const image = opts.image || process.env.MICKE_IMAGE || DEFAULT_IMAGE;
-    const screen = opts.screen || DEFAULT_SCREEN;
+    const image = opts.image || process.env.MICKE_IMAGE || io.DEFAULT_IMAGE;
+    const screen = opts.screen || io.DEFAULT_SCREEN;
     if (!/^\d{2,5}x\d{2,5}x\d{1,3}$/.test(screen)) {
       throw new MickeError("SCREEN_INVALID", `invalid screen "${screen}"`, "Expected WIDTHxHEIGHTxDEPTH, e.g. 1280x800x24.");
     }
@@ -110,12 +99,12 @@ export class Supervisor {
     if (opts.workspace != null) {
       workspace = opts.workspace;
       if (!isAbsolute(workspace) || !existsSync(workspace)) {
-        throw new MickeError("WORKSPACE_INVALID", `workspace "${workspace}" must be an absolute host path that exists`, `It is bind-mounted at /workspace (-v ${workspace}:/workspace).`);
+        throw new MickeError("WORKSPACE_INVALID", `workspace "${workspace}" must be an absolute host path that exists`, `It is mounted at /workspace (-v ${workspace}:/workspace).`);
       }
     }
     this.checkMemoryFloor();
-    if (!(await io.dockerAvailable())) {
-      throw new MickeError("DOCKER_UNAVAILABLE", "docker daemon is not reachable", "Is dockerd running and does this user have access (docker ps)?");
+    if (!(await io.rungvAvailable())) {
+      throw new MickeError("RUNGV_UNAVAILABLE", "the rungv binary is not available", "Install gvx and put `rungv` on PATH (or set MICKE_RUNGV to its absolute path).");
     }
     return this.withBootLock(() => this.bootSession(image, workspace, screen));
   }
@@ -124,67 +113,146 @@ export class Supervisor {
     await this.ensureImage(image);
 
     const id = randId();
-    const name = `micke-${id}`;
-    const args = [
-      "run", "-d", "--init", "--shm-size=1g", "--pull=never",
-      "--name", name, "--label", `micke.session=${id}`,
-      "-e", `MICKE_SCREEN=${screen}`,
-      "-p", "127.0.0.1::6080/tcp", // Docker picks the host port; read back below
-    ];
-    if (workspace) args.push("-v", `${workspace}:/workspace`);
-    args.push(image);
-    const run = await io.docker(args, 60_000);
-    if (run.rc !== 0) {
-      throw new MickeError("DOCKER_ERROR", `docker run failed: ${run.stderr.trim().slice(0, 500)}`, `Try: docker run --rm ${image} true`);
+    const hostname = `micke-${id}`;
+    // The child's stdout/stderr go to a REAL FILE, not a pipe: rungv outlives a
+    // crashed daemon, and a pipe whose reader died would make the guest's next
+    // log write kill the listener (defeating adoption). The file also gives
+    // post-mortem diagnostics. We poll it for ports + the ready line.
+    const logPath = io.logfilePath(this.stateDir, id);
+    const logFd = io.openLogfile(this.stateDir, id);
+    let child: io.SessionProcess;
+    try {
+      child = io.spawnSession({ id, image, workspace, screen, logFd });
+    } catch (err) {
+      closeSync(logFd);
+      io.deleteLogfile(this.stateDir, id);
+      throw new MickeError(
+        "GVX_ERROR",
+        `rungv run failed to start: ${err instanceof Error ? err.message : String(err)}`,
+        "Check MICKE_RUNGV and the rungv installation.",
+      );
     }
-    const containerId = run.stdout.trim();
+    closeSync(logFd); // the child owns its copy now
 
-    const port = await io.hostPort(containerId, 6080);
-    if (port == null) {
-      await io.removeContainer(containerId).catch(() => {});
-      throw new MickeError("DOCKER_ERROR", "could not read back the allocated host port for 6080/tcp");
-    }
+    // Ports arrive as `rungv: publishing 127.0.0.1:<host> -> <guest>/tcp` lines,
+    // before the guest starts. Readiness arrives from the in-guest driver.
+    const ports = new Map<number, number>();
+    let tail = "";
+    let readySeen = false;
+    let exited: number | null = null;
+    void child.exited.then((code) => { exited = code; });
 
-    // Wait for the entrypoint's ready line (desktop up; /tmp/session.env written).
-    const bootTimeout = parseInt(process.env.MICKE_BOOT_TIMEOUT_MS || "30000", 10);
-    const t0 = Date.now();
-    let logs = "";
-    while (Date.now() - t0 < bootTimeout) {
-      logs = await io.containerLogs(containerId);
-      if (logs.includes(READY_LINE)) break;
-      if (!(await io.containerRunning(containerId))) {
-        await io.removeContainer(containerId).catch(() => {});
-        throw new MickeError("DESKTOP_BOOT_TIMEOUT", `container exited during boot:\n${logs.slice(-800)}`);
-      }
-      await Bun.sleep(150);
-    }
-    if (!logs.includes(READY_LINE)) {
-      await io.removeContainer(containerId).catch(() => {});
-      throw new MickeError("DESKTOP_BOOT_TIMEOUT", `"${READY_LINE}" not seen within ${bootTimeout} ms:\n${logs.slice(-800)}`, "Raise MICKE_BOOT_TIMEOUT_MS or inspect the image manually.");
-    }
-
-    const session: LiveSession = {
-      session_id: id, container_id: containerId, container_name: name,
-      image, novnc_port: port, workspace, screen, created_at: Date.now(),
-      shell: null,
+    let logOffset = 0;
+    let lineBuf = "";
+    const pollLog = () => {
+      try {
+        const size = statSync(logPath).size;
+        if (size <= logOffset) return;
+        const fd = openSync(logPath, "r");
+        const len = size - logOffset;
+        const buf = Buffer.allocUnsafe(len);
+        let n = 0;
+        try {
+          n = readSync(fd, buf, 0, len, logOffset);
+        } finally {
+          closeSync(fd);
+        }
+        if (n <= 0) return;
+        logOffset += n;
+        const text = buf.subarray(0, n).toString("utf8");
+        tail = (tail + text).slice(-4096);
+        if (tail.includes(io.DESKTOP_READY_LINE)) readySeen = true;
+        lineBuf += text;
+        let idx: number;
+        while ((idx = lineBuf.indexOf("\n")) >= 0) {
+          const line = lineBuf.slice(0, idx);
+          lineBuf = lineBuf.slice(idx + 1);
+          const p = io.parsePublishLine(line);
+          if (p) ports.set(p.guestPort, p.hostPort);
+        }
+      } catch { /* file rotated/gone; the exit branch reports it */ }
     };
+    const havePorts = () =>
+      ports.has(io.SHELL_GUEST_PORT) && ports.has(io.NOVNC_GUEST_PORT);
+
+    const rawTimeout = parseInt(process.env.MICKE_BOOT_TIMEOUT_MS || "30000", 10);
+    const bootTimeout = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 30_000;
+    const bootDeadline = Date.now() + bootTimeout;
+    const portDeadline = Date.now() + 5_000;
+    while (exited === null) {
+      pollLog();
+      if (readySeen && havePorts()) break;
+      if (!havePorts() && Date.now() > portDeadline) break;
+      if (Date.now() > bootDeadline) break;
+      await Bun.sleep(50);
+    }
+    pollLog();
+
+    if (exited !== null) {
+      await this.killChild(child);
+      io.deleteLogfile(this.stateDir, id);
+      throw new MickeError("DESKTOP_BOOT_TIMEOUT", `sandbox exited during boot (rc=${exited}):\n${tail.slice(-800)}`);
+    }
+    if (!havePorts()) {
+      await this.killChild(child);
+      io.deleteLogfile(this.stateDir, id);
+      throw new MickeError(
+        "GVX_ERROR",
+        `no \`rungv: publishing\` lines within 5000 ms:\n${tail.slice(-800)}`,
+        "The image entrypoint must be micke-driver (image/driver.sh) and rungv must be able to publish ports.",
+      );
+    }
+    if (!readySeen) {
+      await this.killChild(child);
+      io.deleteLogfile(this.stateDir, id);
+      throw new MickeError(
+        "DESKTOP_BOOT_TIMEOUT",
+        `"${io.DESKTOP_READY_LINE}" not seen within ${bootTimeout} ms:\n${tail.slice(-800)}`,
+        "Raise MICKE_BOOT_TIMEOUT_MS or inspect the image manually with rungv run.",
+      );
+    }
+
+    const rec: io.SessionRecord = {
+      session_id: id,
+      rungv_pid: child.pid,
+      hostname,
+      shell_host_port: ports.get(io.SHELL_GUEST_PORT)!,
+      novnc_host_port: ports.get(io.NOVNC_GUEST_PORT)!,
+      image,
+      workspace,
+      screen,
+      created_at: Date.now(),
+    };
+    try {
+      io.writePidfile(this.stateDir, rec); // pidfile first: it is the adoption record
+    } catch (err) {
+      await this.killChild(child);
+      io.deleteLogfile(this.stateDir, id);
+      throw new MickeError(
+        "GVX_ERROR",
+        `could not write session pidfile: ${err instanceof Error ? err.message : String(err)}`,
+        `Check that ${io.sessionsDir(this.stateDir)} is writable.`,
+      );
+    }
+
+    const session: LiveSession = { ...rec, shell: null, shellReady: null, child };
     this.sessions.set(id, session);
-    this.saveState();
     return this.row(session, "ready");
   }
 
-  async closeSession(id: string): Promise<{ closed: string; container_removed: boolean }> {
+  async closeSession(id: string): Promise<{ closed: string; sandbox_removed: boolean }> {
     const live = this.sessions.get(id);
-    const state: SessionState | undefined = live ?? this.orphanStates.get(id);
+    const state: io.SessionRecord | undefined = live ?? this.orphanStates.get(id);
     if (!state) {
       throw new MickeError("SESSION_NOT_FOUND", `no session "${id}"`, "Call session_list to see live and orphaned sessions.");
     }
     live?.shell?.kill();
-    const r = await io.removeContainer(state.container_id).catch(() => ({ rc: 1 }));
+    const removed = await this.terminateSandbox(state.rungv_pid, live?.child ?? null, id);
     this.sessions.delete(id);
     this.orphanStates.delete(id);
-    this.saveState();
-    return { closed: id, container_removed: r.rc === 0 };
+    io.deletePidfile(this.stateDir, id);
+    io.deleteLogfile(this.stateDir, id);
+    return { closed: id, sandbox_removed: removed };
   }
 
   async runShell(
@@ -196,23 +264,24 @@ export class Supervisor {
     const live = this.sessions.get(id);
     if (!live) {
       if (this.orphanStates.has(id)) {
-        throw new MickeError("SESSION_ORPHANED", `session "${id}" belongs to a previous supervisor run`, "Close it with session_close, then session_create a fresh one.");
+        throw new MickeError("SESSION_ORPHANED", `session "${id}" has a pidfile but its sandbox is gone`, "Close it with session_close, then session_create a fresh one.");
       }
       throw new MickeError("SESSION_NOT_FOUND", `no session "${id}"`, "Call session_list first.");
     }
-    if (!live.shell) {
-      live.shell = new ShellChannel(live.container_name);
-      await live.shell.start();
-    }
-    return live.shell.run(command, timeoutMs, maxOutputBytes);
+    const shell = await this.ensureShell(live);
+    return shell.run(command, timeoutMs, maxOutputBytes);
   }
 
   async listSessions(): Promise<SessionRow[]> {
-    const labeled = new Set((await io.listLabeledContainers()).map((c) => c.sessionId));
     for (const [id, s] of this.sessions) {
-      if (!labeled.has(id)) { // container crashed or was removed behind our back
+      const alive = s.child
+        ? s.child.exitCode === null
+        : io.procAlive(s.rungv_pid) && io.procMatches(s.rungv_pid, id);
+      if (!alive) { // sandbox died behind our back
         s.shell?.kill();
         this.sessions.delete(id);
+        io.deletePidfile(this.stateDir, id);
+        io.deleteLogfile(this.stateDir, id);
       }
     }
     const rows = [
@@ -223,9 +292,35 @@ export class Supervisor {
     return rows;
   }
 
-  /** Kill shell channels (supervisor exit). Containers stay; they become orphans. */
+  /**
+   * Kill shell channels only (supervisor exit). rungv children deliberately
+   * stay alive: desktops, chromium windows, and human noVNC logins survive a
+   * daemon crash/restart, and the next start adopts them via their pidfiles.
+   */
   async shutdown(): Promise<void> {
     for (const s of this.sessions.values()) s.shell?.kill();
+  }
+
+  // ---- shell channel ------------------------------------------------------
+
+  private async ensureShell(live: LiveSession): Promise<ShellChannel> {
+    if (live.shell?.alive) return live.shell;
+    if (live.shellReady) return live.shellReady;
+    live.shellReady = (async () => {
+      const channel = new ShellChannel(live.shell_host_port);
+      try {
+        live.shell?.kill();
+        live.shell = channel;
+        await channel.start();
+        return channel;
+      } catch (err) {
+        live.shell = null;
+        throw err;
+      } finally {
+        live.shellReady = null;
+      }
+    })();
+    return live.shellReady;
   }
 
   // ---- image policy (FR-31/32) ---------------------------------------------
@@ -237,12 +332,18 @@ export class Supervisor {
       throw new MickeError(
         "IMAGE_MISSING",
         `image "${image}" is not available locally, and micke never pulls while sessions are live`,
-        `Close live sessions first, or run: docker pull ${image}`,
+        `Close live sessions first, or run: rungv pull -cache-dir ${io.gvxCacheDir()} ${image}`,
       );
     }
+    // A gvx pull compiles layers in memory: this lock is the OOM-avoidance
+    // mechanism (FR-31/32), not merely hygiene.
     const r = await io.pullImage(image);
     if (r.rc !== 0) {
-      throw new MickeError("IMAGE_MISSING", `image "${image}" missing locally and docker pull failed: ${r.stderr.trim().slice(0, 300)}`, `docker pull ${image}`);
+      throw new MickeError(
+        "IMAGE_MISSING",
+        `image "${image}" missing locally and rungv pull failed: ${r.stderr.trim().slice(0, 300)}`,
+        `rungv pull -cache-dir ${io.gvxCacheDir()} ${image}`,
+      );
     }
   }
 
@@ -251,15 +352,15 @@ export class Supervisor {
   /**
    * Instance lock (FR-19): flock on <state dir>/supervisor.lock, held until
    * process exit. Scoped to the state dir because that is the shared state a
-   * second supervisor would corrupt (sessions.json + its containers); the
-   * default config locks ~/.local/state/micke/supervisor.lock as specified.
+   * second supervisor would corrupt (pidfiles + their sandboxes); the default
+   * config locks ~/.local/state/micke/supervisor.lock as specified.
    */
   private async acquireLock(): Promise<void> {
     if (!flock) {
       console.error("micke: warning: flock(2) unavailable — running without the instance lock");
       return;
     }
-    const path = join(dirname(this.stateFile), "supervisor.lock");
+    const path = join(this.stateDir, "supervisor.lock");
     const fd = openSync(path, "a"); // create if missing; never truncates — the holder's pid must stay readable
     // A previous instance may be mid-exit (restart race): retry briefly before refusing.
     const deadline = Date.now() + 1_500;
@@ -305,7 +406,7 @@ export class Supervisor {
       throw new MickeError(
         "INSUFFICIENT_MEMORY",
         `host has ${availMb} MiB free (MemAvailable), below the ${floorMb} MiB floor`,
-        "Close sessions (each chromium session holds ~500 MiB), free host RAM, or lower MICKE_MIN_FREE_MB (0 disables the floor).",
+        "Close sessions (under gvx budget ~2 GiB per chromium session, PSS), free host RAM, or lower MICKE_MIN_FREE_MB (0 disables the floor).",
       );
     }
   }
@@ -317,61 +418,86 @@ export class Supervisor {
     return run;
   }
 
-  // ---- persistence ----------------------------------------------------------
+  // ---- adoption (pidfile discovery; no runtime state to scan) ---------------
 
-  private loadState(): void {
-    try {
-      const raw = JSON.parse(readFileSync(this.stateFile, "utf8"));
-      for (const s of raw.sessions ?? []) this.orphanStates.set(s.session_id, s);
-    } catch { /* no state yet */ }
-  }
-
-  /** Adopt micke.session-labeled containers (from previous runs) as orphans. */
-  private async scanOrphans(): Promise<void> {
-    const labeled = await io.listLabeledContainers();
-    for (const c of labeled) {
-      const known = this.orphanStates.get(c.sessionId);
-      if (known) {
-        known.container_id = c.containerId;
-        if (!c.running) known.novnc_port = null;
+  /**
+   * On start, every pidfile is a candidate. A live pid whose cmdline still
+   * matches `rungv … micke-<id>` is a still-running desktop (adopted as ready,
+   * with its ports read from the file). Anything else is an honest orphan:
+   * close-only, reaped by session_close.
+   */
+  private adoptSessions(): void {
+    for (const rec of io.listPidfiles(this.stateDir)) {
+      if (io.procAlive(rec.rungv_pid) && io.procMatches(rec.rungv_pid, rec.session_id)) {
+        this.sessions.set(rec.session_id, { ...rec, shell: null, shellReady: null, child: null });
       } else {
-        this.orphanStates.set(c.sessionId, {
-          session_id: c.sessionId,
-          container_id: c.containerId,
-          container_name: `micke-${c.sessionId}`,
-          image: "unknown",
-          novnc_port: c.running ? await io.hostPort(c.containerId, 6080) : null,
-          workspace: null,
-          screen: "unknown",
-          created_at: Date.now(),
-        });
+        this.orphanStates.set(rec.session_id, rec);
       }
     }
-    for (const id of this.orphanStates.keys()) {
-      if (!labeled.some((c) => c.sessionId === id)) this.orphanStates.delete(id);
+  }
+
+  // ---- process teardown -----------------------------------------------------
+
+  private async killChild(child: io.SessionProcess): Promise<void> {
+    try { if (child.exitCode === null) child.kill(9); } catch { /* already gone */ }
+    await child.exited.catch(() => {});
+  }
+
+  /**
+   * SIGTERM, escalate to SIGKILL after ~3 s. Measured teardown is ~0.1 s with
+   * zero strays (the whole rungv process tree dies with the rungv pid).
+   */
+  private async terminateSandbox(
+    pid: number,
+    child: io.SessionProcess | null,
+    sessionId: string,
+  ): Promise<boolean> {
+    if (child) {
+      if (child.exitCode !== null) return true;
+      try { child.kill(); } catch { /* raced to exit */ }
+      const termDeadline = Date.now() + 3_000;
+      while (Date.now() < termDeadline) {
+        if (child.exitCode !== null) return true;
+        await Bun.sleep(50);
+      }
+      try { child.kill(9); } catch { /* raced to exit */ }
+      const killDeadline = Date.now() + 2_000;
+      while (Date.now() < killDeadline) {
+        if (child.exitCode !== null) return true;
+        await Bun.sleep(50);
+      }
+      return child.exitCode !== null;
     }
-    this.saveState();
+
+    // Adopted pid: never signal a process that is not still OUR rungv run —
+    // the pid may have been reused after the sandbox died.
+    if (!io.procAlive(pid) || !io.procMatches(pid, sessionId)) return true;
+    try { process.kill(pid, "SIGTERM"); } catch { /* raced to exit */ }
+    const termDeadline = Date.now() + 3_000;
+    while (Date.now() < termDeadline) {
+      if (!io.procAlive(pid)) return true;
+      await Bun.sleep(50);
+    }
+    // Re-check identity before escalating: SIGKILL on a reused pid would hit
+    // an innocent process.
+    if (!io.procMatches(pid, sessionId)) return true;
+    try { process.kill(pid, "SIGKILL"); } catch { /* raced to exit */ }
+    const killDeadline = Date.now() + 2_000;
+    while (Date.now() < killDeadline) {
+      if (!io.procAlive(pid)) return true;
+      await Bun.sleep(50);
+    }
+    return !io.procAlive(pid);
   }
 
-  private saveState(): void {
-    const sessions = [...this.sessions.values(), ...this.orphanStates.values()]
-      .map((s) => {
-        const { shell: _shell, ...state } = s as LiveSession;
-        return state;
-      });
-    try {
-      writeFileSync(this.stateFile, JSON.stringify({ sessions }, null, 2));
-    } catch { /* best effort */ }
-  }
-
-  private row(s: SessionState, status: SessionRow["status"]): SessionRow {
+  private row(s: io.SessionRecord, status: SessionRow["status"]): SessionRow {
     return {
       session_id: s.session_id,
       status,
       image: s.image,
-      novnc_url: s.novnc_port ? `http://127.0.0.1:${s.novnc_port}/vnc.html` : null,
-      container_id: s.container_id,
-      container_name: s.container_name,
+      novnc_url: status === "ready" && s.novnc_host_port ? `http://127.0.0.1:${s.novnc_host_port}/vnc.html` : null,
+      rungv_pid: s.rungv_pid,
+      hostname: s.hostname,
       workspace: s.workspace,
       screen: s.screen,
       created_at: s.created_at,

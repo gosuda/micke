@@ -1,5 +1,15 @@
 # gvx runtime swap — design document
 
+> **Implementation status (2026-11-02): SHIPPED.** The code below is now the
+> real runtime: `src/gvxio.ts` replaces `src/dockerio.ts`, `src/supervisor.ts`
+> uses pidfiles/adoption, `src/shell.ts` speaks TCP to `image/driver.sh`, and
+> the tests run against gvx. One deviation found during implementation: rungv
+> v0.4.1 rejects explicit tmpfs mounts at/below `/dev` ("the guest path must
+> not be /dev or below it"), so the spawn omits `--tmpfs /dev/shm:size=1g` and
+> relies on gvx's default `/dev/shm` (half host RAM). Child stdout/stderr go to
+> a per-session **file**, not a pipe, so a daemon crash cannot break the
+> surviving sandbox's next log write.
+
 Date: 2026-11-02. Design only — no code changed for this document. Repo:
 `~/git/micke`. Inputs read: `docs/research/gvx-only-analysis.md` (§10 owner
 MUST; §1–§8 the OLD stdin-driver regressions), `docs/research/gvx-feasibility.md`
@@ -350,7 +360,7 @@ development — is paid only by maintainers, who keep the trivial local
    (single source of truth for the guest port; the `-p 7801` pair on the
    spawn line references the same constant in gvxio.ts).
 3. **Ready line**: after `/tmp/session.env` appears, additionally `wait_port`
-   the noVNC port (reusing entrypoint.sh :36-45's `/dev/tcp` helper shape)
+   the shell and noVNC ports (reusing entrypoint.sh :36-45's `/dev/tcp` helper shape)
    before `echo 'micke: desktop ready …' >&2` — so session_create's READY_LINE
    (supervisor.ts :71, unchanged) implies the noVNC forward is dialable.
 4. **Early listener**: start the listener BEFORE the entrypoint finishes (the

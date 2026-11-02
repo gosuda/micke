@@ -36,8 +36,8 @@ agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessib
 ```
 
 - **`--no-sandbox`** — chromium's sandbox cannot start inside the micke
-  container (no user namespaces / SUID helpers). Without it chromium exits
-  immediately. The container is the security boundary; the browser sandbox
+  sandbox (no user namespaces / SUID helpers). Without it chromium exits
+  immediately. The gvx sandbox is the security boundary; the browser sandbox
   inside it is redundant.
 - **`--force-renderer-accessibility`** — forces chromium to expose its
   accessibility tree even though there is no assistive-tech client. Without
@@ -79,15 +79,20 @@ is no `--headless` anywhere, on purpose:
 If a test wants a different screen size, set it at create time — don't reach
 for chromium flags.
 
-## /dev/shm: `--shm-size=1g`
+## /dev/shm
 
-Chromium uses `/dev/shm` for shared memory; Docker's default 64 MB makes tabs
-crash with "Aw, Snap" once a page is heavy. The supervisor runs every session
-with `--shm-size=1g` (already the case for `session_create` — you don't need
-to do anything). If you drive the image manually, keep the flag:
+Chromium uses `/dev/shm` for shared memory; too small a tmpfs makes tabs
+crash with "Aw, Snap" once a page is heavy. Under gvx, `/dev/shm` is sized to
+half of host RAM by default — comfortably above the old 1 GB Docker flag — and
+`rungv` refuses explicit tmpfs mounts at/below `/dev`, so micke adds no flag.
+You don't need to do anything for `session_create`.
+
+The per-sandbox memory guard is `rungv -m` (default `2g`, override with
+`MICKE_SESSION_MEMORY`); it is a polling guard, not a cgroup limit. If you
+drive the image manually, keep the guard:
 
 ```sh
-docker run -d --init --shm-size=1g ... micke:latest
+rungv run --pull=never -m 2g -p 7801 -p 6080 ghcr.io/gosuda/micke:latest
 ```
 
 ## The driving loop (cheatsheet)
@@ -171,7 +176,7 @@ The right posture for **every** disposition: treat the action as unproven
 until the world changed. Gate on `wait --window` for the expected navigation,
 confirm with a re-snapshot; the disposition alone is never the assertion.
 
-## Filter big snapshots inside the container
+## Filter big snapshots inside the sandbox
 
 `session_shell` caps each output stream at 256 KiB by default
 (`max_output_bytes`), and a compact snapshot is ONE line of JSON —

@@ -37,6 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         novnc \
         websockify \
         # --- helpers -------------------------------------------------------
+        # python3 is the in-guest shell listener (image/driver.sh): a core
+        # dependency, not an accident of websockify's package graph.
+        python3 \
         xdotool \
         xclip \
         jq \
@@ -61,6 +64,11 @@ RUN groupadd -g "$GID" "$USERNAME" \
 COPY image/entrypoint.sh /usr/local/bin/micke-entrypoint
 RUN chmod 0755 /usr/local/bin/micke-entrypoint
 
+# The ENTRYPOINT under gvx: boots micke-entrypoint as a child and serves the
+# shell channel over TCP (gvx has no exec). `rungv -p 7801` forwards it.
+COPY image/driver.sh /usr/local/bin/micke-driver
+RUN chmod 0755 /usr/local/bin/micke-driver
+
 # Preferred chromium launch path: flags pre-baked (see micke-chromium.sh).
 COPY image/micke-chromium.sh /usr/local/bin/micke-chromium
 RUN chmod 0755 /usr/local/bin/micke-chromium
@@ -68,5 +76,5 @@ RUN chmod 0755 /usr/local/bin/micke-chromium
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
-# Chromium needs >64MB of /dev/shm: run with `--shm-size=1g`.
-ENTRYPOINT ["/usr/local/bin/micke-entrypoint"]
+# Chromium needs >64MB of /dev/shm: micke runs with `-tmpfs /dev/shm:size=1g`.
+ENTRYPOINT ["/usr/local/bin/micke-driver"]

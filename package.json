@@ -2,7 +2,7 @@
   "name": "micke",
   "version": "0.1.0",
   "private": true,
-  "description": "micke supervisor + MCP server (M-min phase 1)",
+  "description": "micke supervisor + MCP server (gvx-only runtime)",
   "type": "module",
   "scripts": {
     "start": "bun run src/main.ts",

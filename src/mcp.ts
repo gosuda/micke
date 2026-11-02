@@ -12,7 +12,7 @@ import {
 import { MickeError, type Supervisor } from "./supervisor.js";
 
 const CREATE_DESC = [
-  "Boot a disposable Linux desktop (Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
+  "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
   "Open chromium with `micke-chromium <url>` (required flags pre-baked); open novnc_url in a browser to watch or take over the desktop.",
   "Then run ALL commands through session_shell on that session_id — env is pre-sourced, `agent-desktop` works directly.",
 ].join(" ");
@@ -20,6 +20,7 @@ const CREATE_DESC = [
 const SHELL_DESC = [
   "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, `agent-desktop snapshot --app chromium -i --compact` (filter with grep/jq IN the command — trees are large), `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`, `agent-desktop screenshot /workspace/x.png`.",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
+  "A dropped channel is recoverable: the next call reconnects with a fresh shell (cwd/env reset).",
 ].join(" ");
 
 const TOOLS = [
@@ -29,7 +30,7 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        image: { type: "string", description: "Docker image (default micke:latest, override with MICKE_IMAGE). Must exist locally or be pullable while no sessions are live." },
+        image: { type: "string", description: "OCI image (default ghcr.io/gosuda/micke:latest, override with MICKE_IMAGE). Pulled with rungv if missing while no sessions are live." },
         workspace: { type: "string", description: "Optional absolute host directory bind-mounted at /workspace (repo in, artifacts out)." },
         screen: { type: "string", description: 'Xvfb screen size WIDTHxHEIGHTxDEPTH (default "1280x800x24").' },
       },
@@ -37,12 +38,12 @@ const TOOLS = [
   },
   {
     name: "session_list",
-    description: "List sessions. Every row carries the novnc_url for live viewing. Includes `orphaned` rows (containers from a previous supervisor run; close them with session_close).",
+    description: "List sessions. Every ready row carries the novnc_url for live viewing. `orphaned` rows have a pidfile but no live sandbox (they survived a daemon restart as a record only); close them with session_close.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
     name: "session_close",
-    description: "Tear a session down: kills its shell, removes the container (docker rm -f) and all state. Also reaps orphaned sessions.",
+    description: "Tear a session down: kills its shell channel and its rungv sandbox (SIGTERM, then SIGKILL), and deletes the pidfile. Also reaps orphaned sessions.",
     inputSchema: {
       type: "object" as const,
       properties: { session_id: { type: "string", description: "Session id from session_create/session_list." } },

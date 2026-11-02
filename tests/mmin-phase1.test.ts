@@ -1,10 +1,12 @@
 // tests/mmin-phase1.test.ts — M-min phase 1 end-to-end verification.
 //
-// On this host (Docker + local image only): starts the real daemon as a
+// On this host (gvx + a cached micke image): starts the real daemon as a
 // subprocess (kernel-picked port), talks MCP over Streamable HTTP, and walks
 // the core loop: create -> noVNC URL (HTTP 200) -> shell (a11y granted,
 // chromium, snapshot refs, persistence, output cap, timeout-kill) -> workspace
-// bind -> close -> container/bash gone -> list reflects everything.
+// bind -> close -> rungv/pidfile gone -> list reflects everything. The final
+// block kills the daemon, restarts it, and proves ADOPTION: the desktop
+// survives and a fresh shell re-attaches to the still-booted chromium.
 //
 // Run: bun test tests/mmin-phase1.test.ts
 
@@ -13,18 +15,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnDaemon, type Daemon } from "./helpers.js";
+import { ensureImage, sh, spawnDaemon, type Daemon } from "./helpers.js";
 
 let client: Client;
 let daemon: Daemon;
 let stateDir: string;
 const created: string[] = []; // session ids created by this run (cleanup safety)
-
-async function sh(args: string[]): Promise<{ rc: number; stdout: string }> {
-  const proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  return { rc: await proc.exited, stdout };
-}
 
 async function call<T = any>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   const res: any = await client.callTool({ name, arguments: args });
@@ -39,17 +35,16 @@ async function callErr(name: string, args: Record<string, unknown>): Promise<{ c
   return JSON.parse(res.content[0].text);
 }
 
+function pidfile(id: string): string {
+  return join(stateDir, "sessions", `${id}.json`);
+}
+
 beforeAll(async () => {
-  // Test image policy: micke:latest is the default; retag the verified local image.
-  const tags = await sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]);
-  if (!tags.stdout.includes("micke:latest")) {
-    expect(tags.stdout).toContain("micke:novnc");
-    expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
-  }
+  await ensureImage();
   stateDir = mkdtempSync(join(tmpdir(), "micke-test-state-"));
   daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
   client = await daemon.connect("micke-test");
-}, 60_000);
+}, 600_000);
 
 afterAll(async () => {
   for (const id of created) await client.callTool({ name: "session_close", arguments: { session_id: id } }).catch(() => {});
@@ -59,17 +54,18 @@ afterAll(async () => {
 }, 60_000);
 
 test(
-  "M-min phase 1: supervisor + 4 tools + persistent shell, end to end",
+  "M-min phase 1: supervisor + 4 tools + persistent shell + adoption, end to end",
   async () => {
     // --- 1. session_create: ready + novnc_url --------------------------------
     const tCreate = Date.now();
     const a = await call("session_create");
     created.push(a.session_id);
     const bootMs = Date.now() - tCreate;
-    console.log(`create -> session=${a.session_id} boot=${bootMs}ms url=${a.novnc_url}`);
+    console.log(`create -> session=${a.session_id} boot=${bootMs}ms url=${a.novnc_url} pid=${a.rungv_pid}`);
     expect(a.session_id).toMatch(/^[0-9a-f]{8}$/);
     expect(a.status).toBe("ready");
     expect(a.novnc_url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/vnc\.html$/);
+    expect(existsSync(pidfile(a.session_id))).toBe(true);
 
     // --- 2. noVNC URL reachable: HTTP 200 (port allocation end-to-end) ------
     const page = await fetch(a.novnc_url);
@@ -158,6 +154,19 @@ test(
     expect(alive.rc).toBe(0);
     expect(alive.stdout.trim()).toBe("alive");
 
+    // --- 7b. dropped channel self-heals: kill the guest bash, next call reconnects ---
+    const drop = await call("session_shell", {
+      session_id: a.session_id,
+      command: "(sleep 0.3; kill -9 $$) >/dev/null 2>&1 & echo dropping",
+    });
+    expect(drop.stdout.trim()).toBe("dropping");
+    await Bun.sleep(1_000);
+    const reconnected = await call("session_shell", { session_id: a.session_id, command: "pwd; echo reconnected" });
+    console.log(`reconnect -> pwd=${reconnected.stdout.trim().split("\n")[0]} rc=${reconnected.rc}`);
+    expect(reconnected.rc).toBe(0);
+    expect(reconnected.stdout).toContain("reconnected");
+    expect(reconnected.stdout.split("\n")[0]).toBe("/home/agent"); // fresh bash, cwd reset
+
     // --- 8. list reflects the live session ------------------------------------
     let rows = (await call("session_list")).sessions;
     const rowA = rows.find((r: any) => r.session_id === a.session_id);
@@ -169,28 +178,26 @@ test(
     const b = await call("session_create", { workspace: ws });
     created.push(b.session_id);
     expect(b.status).toBe("ready");
-    expect(b.novnc_port ?? parseInt(b.novnc_url.match(/:(\d+)\//)![1], 10)).not.toBe(
-      parseInt(a.novnc_url.match(/:(\d+)\//)![1], 10),
-    );
+    expect(b.novnc_url).not.toBe(a.novnc_url);
     await call("session_shell", {
       session_id: b.session_id,
-      command: "echo hello-from-container > /workspace/phase1.txt",
+      command: "echo hello-from-sandbox > /workspace/phase1.txt",
     });
     const hostFile = readFileSync(join(ws, "phase1.txt"), "utf8");
     console.log(`workspace bind -> host read "${hostFile.trim()}" from ${ws}/phase1.txt`);
-    expect(hostFile).toBe("hello-from-container\n");
+    expect(hostFile).toBe("hello-from-sandbox\n");
     rmSync(ws, { recursive: true, force: true });
 
-    // --- 10. close: container gone, bash gone, list updated -------------------
+    // --- 10. close: sandbox gone, pidfile gone, list updated ------------------
     const tClose = Date.now();
     const closed = await call("session_close", { session_id: a.session_id });
     const teardownMs = Date.now() - tClose;
-    console.log(`close -> container_removed=${closed.container_removed} teardown=${teardownMs}ms`);
+    console.log(`close -> sandbox_removed=${closed.sandbox_removed} teardown=${teardownMs}ms`);
 
-    const left = await sh(["docker", "ps", "-a", "--filter", `label=micke.session=${a.session_id}`, "--format", "{{.ID}}"]);
-    expect(left.stdout.trim()).toBe(""); // container gone
-    const strays = await sh(["pgrep", "-f", `micke-${a.session_id}`]);
-    expect(strays.rc).not.toBe(0); // no docker-exec/bash client left
+    expect(closed.sandbox_removed).toBe(true);
+    expect(existsSync(pidfile(a.session_id))).toBe(false);
+    const left = await sh(["pgrep", "-f", `rungv run .*micke-${a.session_id}`]);
+    expect(left.rc).not.toBe(0); // no rungv process left
 
     rows = (await call("session_list")).sessions;
     expect(rows.find((r: any) => r.session_id === a.session_id)).toBeUndefined();
@@ -209,27 +216,50 @@ test(
     const finalRows = (await call("session_list")).sessions;
     expect(finalRows.length).toBe(0);
 
-    // --- 13. orphan detection: container outliving the supervisor ------------
-    // Start a session, kill the DAEMON (simulated supervisor death), restart,
-    // and confirm the container is listed as orphaned, then reaped. Orphans
-    // stay list/close-only for now — re-attach lands with the gvx runtime
-    // swap (docs/research/gvx-only-analysis.md §10).
+    // --- 13. daemon death + adoption: the desktop outlives the supervisor -----
+    // Create + launch chromium, SIGKILL the daemon, restart on the same state
+    // dir: the pidfile's pid+ports are enough to ADOPT the still-running
+    // sandbox. A fresh shell re-attaches (fresh bash: cwd/env reset), and the
+    // chromium window from before the crash is still there.
     const c = await call("session_create");
     created.push(c.session_id);
+    await call("session_shell", {
+      session_id: c.session_id,
+      command: "micke-chromium https://example.com",
+      timeout_ms: 60_000,
+    });
+    const preWait = JSON.parse((await call("session_shell", {
+      session_id: c.session_id,
+      command: 'agent-desktop wait --window "Example Domain" --app chromium --timeout 20000',
+      timeout_ms: 30_000,
+    })).stdout);
+    expect(preWait.data.found).toBe(true);
+
     await client.close();
-    await daemon.kill(); // SIGKILL: the container stays, becoming an orphan
+    await daemon.kill(); // SIGKILL: the rungv child stays alive (no parent-death semantics)
     daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir }); // new ephemeral port
     client = await daemon.connect("micke-test-restart");
+
     rows = (await call("session_list")).sessions;
-    const orphan = rows.find((r: any) => r.session_id === c.session_id);
-    console.log(`after supervisor restart -> session ${c.session_id} listed as ${orphan?.status}`);
-    expect(orphan?.status).toBe("orphaned");
-    expect((await callErr("session_shell", { session_id: c.session_id, command: "echo x" })).code).toBe("SESSION_ORPHANED");
+    const adopted = rows.find((r: any) => r.session_id === c.session_id);
+    console.log(`after daemon restart -> session ${c.session_id} listed as ${adopted?.status} url=${adopted?.novnc_url}`);
+    expect(adopted?.status).toBe("ready"); // adopted, not orphaned
+    expect(adopted?.novnc_url).toBe(c.novnc_url); // ports survived in the pidfile
+
+    const fresh = await call("session_shell", { session_id: c.session_id, command: "pwd" });
+    expect(fresh.rc).toBe(0);
+    expect(fresh.stdout.trim()).toBe("/home/agent"); // fresh bash, exec parity
+
+    const postWait = JSON.parse((await call("session_shell", {
+      session_id: c.session_id,
+      command: 'agent-desktop wait --window "Example Domain" --app chromium --timeout 5000',
+    })).stdout);
+    expect(postWait.data.found).toBe(true); // the desktop survived the crash
+
     await call("session_close", { session_id: c.session_id });
-    const gone = await sh(["docker", "ps", "-a", "--filter", `label=micke.session=${c.session_id}`, "--format", "{{.ID}}"]);
-    expect(gone.stdout.trim()).toBe("");
-    console.log(`orphan reaped via session_close`);
+    expect(existsSync(pidfile(c.session_id))).toBe(false);
     expect((await call("session_list")).sessions.length).toBe(0);
+    console.log("adoption proof complete: desktop survived daemon death and was re-attached");
   },
   300_000,
 );

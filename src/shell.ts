@@ -1,19 +1,23 @@
-// shell — ONE long-lived `bash` per session, via `docker exec -i` (no `-t`).
+// shell — ONE long-lived shell per session, over a TCP socket to the guest's
+// socket driver (image/driver.sh). gvx has no exec: the driver listens on
+// 127.0.0.1:<picked host port> -> guest :7801 and forks one bash per connection.
 //
-// The container-side bash is initialized with a `__micke_run` wrapper (below).
 // The host writes one request line per command and parses the frame that comes
 // back. Protocol (documented in docs/server-internals.md):
 //
-//   host -> container:  __micke_run <timeout_ms> <max_output_bytes> <base64-cmd>\n
-//   container -> host:
+//   host -> guest:  __micke_run <timeout_ms> <max_output_bytes> <base64-cmd>\n
+//   guest -> host:
 //     ===BEGIN===\n
 //     <stdout bytes>\n===STDERR===\n
 //     <stderr bytes>\n[===TIMEOUT===\n]\n===END rc=N===\n
 //
-// The command runs in a background subshell (its own process group via `set -m`)
-// so a per-command watchdog can TERM/KILL exactly that group on timeout while
-// the persistent bash survives. cwd + exported env persist across commands:
-// the wrapper diffs `export -p` before/after and re-applies changes globally.
+// The `__micke_run` wrapper lives in the image (byte-equal to the old exec
+// INIT): the command runs in a background process group so a per-command
+// watchdog can TERM/KILL exactly that group while the bash survives. cwd +
+// exported env persist across commands within one connection.
+//
+// A dropped connection is recoverable: the desktop survives, a fresh connection
+// gets a fresh bash (exec-channel semantics), and the NEXT run() reconnects.
 
 import { MickeError } from "./supervisor.js";
 
@@ -26,90 +30,7 @@ export interface ShellResult {
   durationMs: number;
 }
 
-const INIT = String.raw`
-__micke_after() {
-    # $1 = rc of the evaluated command; idempotent (first rc wins)
-    if [ ! -s "$rcfile" ]; then printf '%s' "$1" > "$rcfile"; fi
-    printf '%s' "$PWD" > "$dfile"
-    export -p | sort > "$after"
-}
-__micke_sig() { __micke_after "$1"; exit "$1"; }
-__micke_run() {
-    # $1 = timeout_ms (0 = none), $2 = max_output_bytes per stream, $3 = base64 command
-    local tmo="$1" limit="$2" b64="$3"
-    local cmd out err rc before after dfile rcfile flag cpid wpid osz esz
-    cmd="$(printf '%s' "$b64" | base64 -d)"
-    out="$(mktemp /tmp/.micke-out.XXXXXX)"
-    err="$(mktemp /tmp/.micke-err.XXXXXX)"
-    before="$(mktemp /tmp/.micke-env.XXXXXX)"
-    after="$(mktemp /tmp/.micke-env2.XXXXXX)"
-    dfile="$(mktemp /tmp/.micke-dir.XXXXXX)"
-    rcfile="$(mktemp /tmp/.micke-rc.XXXXXX)"
-    flag="$(mktemp /tmp/.micke-flag.XXXXXX)"
-    export -p | sort > "$before"
-    printf '===BEGIN===\n'
-    (
-        trap '__micke_sig 143' TERM
-        trap '__micke_sig 130' INT
-        trap '__micke_sig 129' HUP
-        trap '__micke_after $?' EXIT
-        eval "$cmd"
-        __micke_after $?
-    ) > "$out" 2> "$err" < /dev/null &
-    cpid=$!
-    wpid=""
-    if [ "$tmo" -gt 0 ] 2>/dev/null; then
-        local secs="$((tmo / 1000)).$(printf '%03d' $((tmo % 1000)))"
-        (
-            sleep "$secs"
-            if [ ! -s "$rcfile" ]; then
-                printf '1' > "$flag"
-                kill -TERM -- "-$cpid" 2>/dev/null
-                sleep 2
-                kill -KILL -- "-$cpid" 2>/dev/null
-            fi
-        ) &
-        wpid=$!
-    fi
-    wait "$cpid"; rc=$?
-    if [ -n "$wpid" ]; then kill -TERM -- "-$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; fi
-    if [ -s "$rcfile" ]; then rc="$(cat "$rcfile")"; fi
-    osz=$(wc -c < "$out"); esz=$(wc -c < "$err")
-    if [ "$osz" -gt "$limit" ]; then
-        head -c "$limit" "$out"; printf '\n…[truncated %s bytes]\n' "$((osz - limit))"
-    else
-        cat "$out"
-    fi
-    printf '\n===STDERR===\n'
-    if [ "$esz" -gt "$limit" ]; then
-        head -c "$limit" "$err"; printf '\n…[truncated %s bytes]\n' "$((esz - limit))"
-    else
-        cat "$err"
-    fi
-    if [ -s "$flag" ]; then printf '\n===TIMEOUT===\n'; fi
-    printf '\n===END rc=%s===\n' "$rc"
-    # Persist cwd + exported env, but only if the command completed (not killed)
-    if [ -s "$rcfile" ] && [ -s "$dfile" ] && [ -s "$after" ] && [ ! -s "$flag" ]; then
-        while read -r n; do
-            case "$n" in ''|*[!A-Za-z0-9_]*|PWD|OLDPWD|SHLVL|_) continue ;; esac
-            unset "$n" 2>/dev/null || true
-        done < <(comm -23 "$before" "$after" | sed 's/^declare -[^ ]* \([^=]*\)=.*/\1/')
-        while IFS= read -r l; do
-            eval "$(printf '%s' "$l" | sed 's/^declare -x /declare -gx /')" 2>/dev/null || true
-        done < <(comm -13 "$before" "$after" | grep -v -e 'PWD=' -e 'OLDPWD=' -e 'SHLVL=' -e '^[^ ]* _=')
-        cd -- "$(cat "$dfile")" 2>/dev/null || true
-    fi
-    rm -f "$out" "$err" "$before" "$after" "$dfile" "$rcfile" "$flag"
-}
-# Desktop env (DISPLAY/D-Bus/AT-SPI) is published by the entrypoint; wait for it
-# so agent-desktop works with no manual setup.
-i=0
-while [ "$i" -lt 100 ] && [ ! -f /tmp/session.env ]; do sleep 0.1; i=$((i+1)); done
-. /tmp/session.env 2>/dev/null || true
-set -m 2>/dev/null || true
-echo '===SHELL_READY==='
-`;
-
+const SHELL_READY = "===SHELL_READY===\n";
 const BEGIN = "===BEGIN===\n";
 const STDERR_MARK = "\n===STDERR===\n";
 const TIMEOUT_MARK = "\n===TIMEOUT===\n";
@@ -153,35 +74,67 @@ function parseFrame(buf: Buffer): Frame | null {
 }
 
 export class ShellChannel {
-  private proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | null = null;
+  private socket: Bun.Socket | null = null;
   private buf = Buffer.alloc(0);
-  private stderrTail = "";
+  private diag = "";
   private readyWaiter: (() => void) | null = null;
+  private drainWaiter: (() => void) | null = null;
   private frameWaiter:
     | { resolve: (f: Frame) => void; reject: (err: Error) => void }
     | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private dead = false;
 
-  constructor(private container: string) {}
+  constructor(private port: number) {}
 
   get alive(): boolean {
-    return !!this.proc && !this.dead;
+    return !!this.socket && !this.dead;
   }
 
-  /** Spawn `docker exec -i bash`, run the init script, wait for readiness. */
+  /** Connect to the in-guest listener and wait for ===SHELL_READY===. */
   async start(): Promise<void> {
-    if (this.proc) return;
-    const proc = Bun.spawn(["docker", "exec", "-i", this.container, "bash"], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    this.proc = proc;
-    void this.readStderr();
+    if (this.socket) return;
+    this.dead = false;
+    this.diag = "";
+    this.buf = Buffer.alloc(0);
+    // The driver starts its listener before the desktop finishes booting, but
+    // a just-respawned listener can take ~0.5 s: retry briefly.
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        this.socket = await Bun.connect({
+          hostname: "127.0.0.1",
+          port: this.port,
+          socket: {
+            data: (_socket, chunk) => this.onData(chunk as Buffer),
+            close: () => this.die("socket closed"),
+            error: (_socket, err) => this.die(`socket error: ${err.message}`),
+            drain: () => {
+              const w = this.drainWaiter;
+              this.drainWaiter = null;
+              w?.();
+            },
+          },
+        });
+        break;
+      } catch (err) {
+        lastErr = err;
+        await Bun.sleep(500);
+      }
+    }
+    if (!this.socket) {
+      this.die(`connect failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+      throw new MickeError(
+        "SHELL_UNAVAILABLE",
+        `cannot connect to the session shell on 127.0.0.1:${this.port}`,
+        this.diag || "The sandbox may have exited; check session_list.",
+      );
+    }
+    // Set the waiter after the TCP connect resolves: no data can be delivered
+    // before this continuation yields, so the ready marker cannot be missed.
     const ready = new Promise<void>((resolve, reject) => {
       const t = setTimeout(
-        () => reject(new MickeError("SHELL_UNAVAILABLE", `shell did not initialize in container ${this.container}`, "The container may have exited; check session_list.")),
+        () => reject(new MickeError("SHELL_UNAVAILABLE", `shell did not initialize on 127.0.0.1:${this.port}`, "The sandbox may have exited; check session_list.")),
         20_000,
       );
       this.readyWaiter = () => {
@@ -189,38 +142,30 @@ export class ShellChannel {
         resolve();
       };
     });
-    void this.readLoop(proc).catch(() => this.die("shell read loop failed"));
-    await this.write(INIT + "\n");
-    await ready;
+    try {
+      await ready;
+    } catch (err) {
+      this.die("ready marker not received");
+      throw err;
+    }
   }
 
-  private async readLoop(proc: Bun.Subprocess<"pipe", "pipe", "pipe">): Promise<void> {
-    for await (const chunk of proc.stdout!) {
-      this.buf = Buffer.concat([this.buf, chunk as Buffer]);
-      // Consume init marker if pending.
-      if (this.readyWaiter) {
-        const rIdx = this.buf.indexOf("===SHELL_READY===\n");
-        if (rIdx >= 0) {
-          this.buf = Buffer.concat([
-            this.buf.subarray(0, rIdx),
-            this.buf.subarray(rIdx + "===SHELL_READY===\n".length),
-          ]);
-          const w = this.readyWaiter;
-          this.readyWaiter = null;
-          w();
-        }
+  private onData(chunk: Buffer): void {
+    this.buf = Buffer.concat([this.buf, chunk]);
+    // Consume the per-connection ready marker if pending.
+    if (this.readyWaiter) {
+      const rIdx = this.buf.indexOf(SHELL_READY);
+      if (rIdx >= 0) {
+        this.buf = Buffer.concat([
+          this.buf.subarray(0, rIdx),
+          this.buf.subarray(rIdx + SHELL_READY.length),
+        ]);
+        const w = this.readyWaiter;
+        this.readyWaiter = null;
+        w();
       }
-      if (this.frameWaiter) this.tryExtract();
     }
-    this.die("shell exited");
-  }
-
-  private async readStderr(): Promise<void> {
-    // Diagnostics from the wrapper bash itself (not command output) — kept as a
-    // tail for error messages.
-    for await (const chunk of this.proc!.stderr!) {
-      this.stderrTail = (this.stderrTail + (chunk as Buffer).toString()).slice(-4096);
-    }
+    if (this.frameWaiter) this.tryExtract();
   }
 
   private tryExtract(): void {
@@ -233,7 +178,7 @@ export class ShellChannel {
       this.frameWaiter = null;
       this.die(String(err));
       w.reject(
-        new MickeError("SHELL_UNAVAILABLE", `shell protocol error: ${err}`, this.stderrTail || undefined),
+        new MickeError("SHELL_UNAVAILABLE", `shell protocol error: ${err}`, this.diag || undefined),
       );
       return;
     }
@@ -245,24 +190,50 @@ export class ShellChannel {
   }
 
   private async write(s: string): Promise<void> {
-    const proc = this.proc;
-    if (!proc) throw new MickeError("SHELL_UNAVAILABLE", "shell is not running", undefined);
-    proc.stdin.write(s);
-    await proc.stdin.flush();
+    const socket = this.socket;
+    if (!socket) throw new MickeError("SHELL_UNAVAILABLE", "shell is not running", undefined);
+    const bytes = Buffer.from(s, "utf8");
+    let off = 0;
+    try {
+      while (off < bytes.length) {
+        const n = socket.write(bytes, off, bytes.length - off);
+        if (n <= 0) throw new Error("socket is closed");
+        off += n;
+        if (off < bytes.length) {
+          // Backpressure: wait for the drain callback before the next chunk.
+          await new Promise<void>((resolve) => {
+            this.drainWaiter = resolve;
+          });
+        }
+      }
+      socket.flush();
+    } catch (err) {
+      this.die(`write failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw new MickeError("SHELL_UNAVAILABLE", "shell channel died while sending a command", this.diag || undefined);
+    }
   }
 
   private die(reason: string): void {
     if (this.dead) return;
     this.dead = true;
+    this.diag = (this.diag + (this.diag ? " | " : "") + reason).slice(-2048);
+    const drain = this.drainWaiter;
+    this.drainWaiter = null;
+    drain?.();
     if (this.frameWaiter) {
       const w = this.frameWaiter;
       this.frameWaiter = null;
-      w.reject(new MickeError("SHELL_UNAVAILABLE", `shell channel died: ${reason}`, this.stderrTail || undefined));
+      w.reject(new MickeError("SHELL_UNAVAILABLE", `shell channel died: ${reason}`, this.diag));
     }
-    if (this.readyWaiter) {
-      // start()'s timeout will surface the error; nothing else to do here.
-    }
-    this.kill();
+    this.closeSocket();
+  }
+
+  private closeSocket(): void {
+    const socket = this.socket;
+    this.socket = null;
+    if (!socket) return;
+    try { socket.end(); } catch { /* already closed */ }
+    try { socket.terminate(); } catch { /* already closed */ }
   }
 
   /** Run one command. Serialized: one in-flight command per shell. */
@@ -277,8 +248,8 @@ export class ShellChannel {
     if (!this.alive) {
       throw new MickeError(
         "SHELL_UNAVAILABLE",
-        `shell for container ${this.container} is not running`,
-        "The session's shell died; close and re-create the session.",
+        `shell on port ${this.port} is not running`,
+        "The session's shell dropped; the next call reconnects with a fresh shell (cwd/env reset).",
       );
     }
     const t0 = Date.now();
@@ -287,8 +258,8 @@ export class ShellChannel {
       this.frameWaiter = { resolve, reject };
     });
     await this.write(`__micke_run ${Math.max(0, Math.floor(timeoutMs))} ${Math.max(1, Math.floor(maxBytes))} ${b64}\n`);
-    // Host-side backstop: the container watchdog should fire first; if the
-    // frame never arrives at all, the channel is unusable.
+    // Host-side backstop: the guest watchdog should fire first; if the frame
+    // never arrives at all, the channel is unusable.
     const graceMs = Math.max(timeoutMs, 1_000) + 15_000;
     let frame: Frame;
     let backstop: ReturnType<typeof setTimeout> | undefined;
@@ -297,7 +268,7 @@ export class ShellChannel {
         framePromise,
         new Promise<never>((_, reject) => {
           backstop = setTimeout(
-            () => reject(new MickeError("SHELL_UNAVAILABLE", `no response after ${graceMs}ms; shell channel killed`, this.stderrTail || undefined)),
+            () => reject(new MickeError("SHELL_UNAVAILABLE", `no response after ${graceMs}ms; shell channel killed`, this.diag || undefined)),
             graceMs,
           );
         }),
@@ -328,14 +299,14 @@ export class ShellChannel {
 
   kill(): void {
     this.dead = true;
-    const proc = this.proc;
-    this.proc = null;
-    if (proc) {
-      try { proc.stdin?.end(); } catch { /* already closed */ }
-      try { proc.kill(9); } catch { /* already gone */ }
-      // Reap (also on the error paths below): a killed-but-unawaited child
-      // could linger as a zombie and show up in leak-cycle counts (FR-10).
-      void proc.exited.then(() => {}, () => {});
+    if (this.frameWaiter) {
+      const w = this.frameWaiter;
+      this.frameWaiter = null;
+      w.reject(new MickeError("SHELL_UNAVAILABLE", "shell channel closed", this.diag || undefined));
     }
+    const drain = this.drainWaiter;
+    this.drainWaiter = null;
+    drain?.();
+    this.closeSocket();
   }
 }

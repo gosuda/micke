@@ -1,19 +1,18 @@
 # image — build and push the micke desktop image to ghcr.io.
 #
-# Purpose: maintainer-side build leg of the pull-based image distribution
-# decided on 2026-11-02 (docs/research/gvx-only-analysis.md §10) — the owner
-# MUST is gvx-only, with the runtime swap designed in
-# docs/research/gvx-runtime-design.md but not yet implemented, so today users
-# `docker pull` the image from ghcr.io (set MICKE_IMAGE) instead of building
-# it; once the swap lands it becomes `rungv pull`. `docker save` → `rungv
-# load` remains the air-gapped fallback. This workflow is the only place the
-# image is built going forward.
+# Purpose: the maintainer-side build leg of the pull-based image distribution.
+# micke's runtime is gvx-only (owner MUST 2026-11-02): users `rungv pull` this
+# image (set MICKE_IMAGE), never build it. Docker is used HERE as the build
+# tool (Buildx/build-push-action) and `docker save` → `rungv load` remains the
+# air-gapped ingest fallback — Docker is not a session runtime. This workflow
+# is the only place the image is built going forward.
 #
 # Build-context contract: the Dockerfile lives in image/ but its COPY sources
-# (image/entrypoint.sh, image/micke-chromium.sh) are relative to the REPO
-# ROOT. The verified local build is `docker build -t micke -f image/Dockerfile .`
-# — so here context is `.` (repo root) and `file` points at image/Dockerfile.
-# Do not "fix" this to context: ./image; the COPY lines would break.
+# (image/entrypoint.sh, image/driver.sh, image/micke-chromium.sh) are relative
+# to the REPO ROOT. The verified local build is `docker build -t micke -f
+# image/Dockerfile .` — so here context is `.` (repo root) and `file` points at
+# image/Dockerfile. Do not "fix" this to context: ./image; the COPY lines would
+# break.
 
 name: image
 

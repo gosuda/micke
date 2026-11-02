@@ -11,9 +11,12 @@
 #   systemctl --user enable --now micke
 #
 # Notes:
-# - Docker (the container runtime) must be reachable by this user; a user
-#   unit cannot order itself after the system docker.service, so the daemon
-#   simply reports DOCKER_UNAVAILABLE per call until dockerd is up.
+# - `rungv` (gvx v0.4.x) must be on PATH. Add its directory to
+#   Environment=PATH= below if your user unit does not inherit your shell PATH
+#   (or set MICKE_RUNGV=/absolute/path/to/rungv).
+# - Sandboxes deliberately outlive the daemon: Restart=on-failure restarts
+#   micke without losing desktops, and the next start adopts them from their
+#   pidfiles. rungv needs no daemon or root.
 # - MICKE_PORT (default 7800) is the one port for MCP (POST /mcp) and the
 #   dashboard (GET /), bound to 127.0.0.1 only.
 

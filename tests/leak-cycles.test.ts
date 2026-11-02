@@ -3,24 +3,25 @@
 // create -> one shell command -> close, then:
 //   - supervisor fd count back to baseline (±FD_TOLERANCE — documented below)
 //   - supervisor child-process count back to baseline (exactly; a leaked
-//     `docker exec` shell client would show up here)
-//   - zero `micke.session`-labeled containers
-//   - zero stray host-side `docker exec`/bash processes for micke containers
+//     rungv child or socket would show up here)
+//   - zero live `rungv run … micke-<id>` processes
+//   - zero session pidfiles
 //
 // Run on its own (or with the whole suite): bun test tests/leak-cycles.test.ts
-// Needs Docker + the local micke image; keeps itself under ~60 s.
+// Needs gvx + a cached micke image; keeps itself under ~60 s (gvx cold start
+// is ~1 s per cycle).
 //
 // FD_TOLERANCE: fds may legitimately drift a little between two idle samples
 // (Bun internals, socket bookkeeping); what must NOT happen is per-cycle
-// accumulation — 20 cycles x (1 stdin + 1 stdout + 1 stderr + sockets) would
-// be ~80+ fds if channels leaked. 8 is generous headroom over zero.
+// accumulation — 20 cycles x (socket + pipes) would be ~40+ fds if channels
+// leaked. 8 is generous headroom over zero.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnDaemon, type Daemon } from "./helpers.js";
+import { ensureImage, sh, spawnDaemon, type Daemon } from "./helpers.js";
 
 const CYCLES = 20;
 const FD_TOLERANCE = 8;
@@ -31,12 +32,6 @@ let stateDir: string;
 let baselineFds = 0;
 let baselineChildren = 0;
 
-async function sh(args: string[]): Promise<{ rc: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  return { rc: await proc.exited, stdout, stderr };
-}
-
 async function call<T = any>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   const res: any = await client.callTool({ name, arguments: args });
   const text = res.content?.[0]?.text ?? "{}";
@@ -45,7 +40,12 @@ async function call<T = any>(name: string, args: Record<string, unknown> = {}): 
 }
 
 function fdCount(): number {
-  return readdirSync(`/proc/${daemon.proc.pid}/fd`).length;
+  const procPath = `/proc/${daemon.proc.pid}/fd`;
+  if (existsSync(procPath)) return readdirSync(procPath).length;
+  // macOS/BSD fallback: lsof lists one fd per line plus a header.
+  const r = Bun.spawnSync(["lsof", "-p", String(daemon.proc.pid)], { stdout: "pipe", stderr: "ignore" });
+  const lines = r.stdout.toString().split("\n").filter(Boolean).length;
+  return Math.max(0, lines - 1);
 }
 
 async function childCount(): Promise<number> {
@@ -60,16 +60,13 @@ async function oneCycle(tag: string): Promise<number> {
   expect(shell.rc).toBe(0);
   expect(shell.stdout.trim()).toBe(tag);
   const closed = await call("session_close", { session_id: a.session_id });
-  expect(closed.container_removed).toBe(true);
+  expect(closed.sandbox_removed).toBe(true);
+  expect(existsSync(join(stateDir, "sessions", `${a.session_id}.json`))).toBe(false);
   return Date.now() - t0;
 }
 
 beforeAll(async () => {
-  const tags = await sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]);
-  if (!tags.stdout.includes("micke:latest")) {
-    expect(tags.stdout).toContain("micke:novnc");
-    expect((await sh(["docker", "tag", "micke:novnc", "micke:latest"])).rc).toBe(0);
-  }
+  await ensureImage();
   stateDir = mkdtempSync(join(tmpdir(), "micke-leak-"));
   daemon = await spawnDaemon({ MICKE_STATE_DIR: stateDir });
   client = await daemon.connect("micke-leak-test");
@@ -81,7 +78,7 @@ beforeAll(async () => {
   baselineFds = fdCount();
   baselineChildren = await childCount();
   console.log(`baseline (after warm-up cycle, ${warmMs}ms) -> fds=${baselineFds} children=${baselineChildren} pid=${serverPid}`);
-}, 120_000);
+}, 600_000);
 
 afterAll(async () => {
   await client.close().catch(() => {});
@@ -90,7 +87,7 @@ afterAll(async () => {
 }, 60_000);
 
 test(
-  `FR-10: ${CYCLES} create/shell/close cycles leave no fds, processes, or containers behind`,
+  `FR-10: ${CYCLES} create/shell/close cycles leave no fds, processes, or sandboxes behind`,
   async () => {
     const t0 = Date.now();
     let cycleMs = 0;
@@ -100,7 +97,7 @@ test(
     const totalMs = Date.now() - t0;
     console.log(`${CYCLES} cycles in ${totalMs}ms (avg cycle ${Math.round(cycleMs / CYCLES)}ms)`);
 
-    await Bun.sleep(800); // let transient `docker` CLI children exit + reap
+    await Bun.sleep(800); // let transient children exit + reap
     const finalFds = fdCount();
     const finalChildren = await childCount();
     console.log(`leak deltas -> fds ${baselineFds} -> ${finalFds} (Δ${finalFds - baselineFds}, tolerance ±${FD_TOLERANCE}); children ${baselineChildren} -> ${finalChildren} (Δ${finalChildren - baselineChildren})`);
@@ -108,18 +105,15 @@ test(
     expect(Math.abs(finalFds - baselineFds)).toBeLessThanOrEqual(FD_TOLERANCE);
     expect(finalChildren).toBe(baselineChildren);
 
-    // zero micke.session-labeled containers
-    const containers = await sh(["docker", "ps", "-a", "-q", "--filter", "label=micke.session"]);
-    expect(containers.stdout.trim()).toBe("");
+    // zero live sandboxes for micke
+    const sandboxes = await sh(["pgrep", "-f", "rungv run .*micke-"]);
+    console.log(`stray rungv sandboxes -> ${sandboxes.rc === 0 ? sandboxes.stdout.trim() : "none"}`);
+    expect(sandboxes.rc).not.toBe(0);
 
-    // zero stray host-side shell clients (`docker exec -i micke-<id> bash`)
-    const strays = await sh(["pgrep", "-af", "docker exec.*micke-"]);
-    console.log(`stray docker-exec processes -> ${strays.rc === 0 ? strays.stdout.trim() : "none"}`);
-    expect(strays.rc).not.toBe(0);
-
-    // ...and no stray host bash spawned for them either
-    const bashStrays = await sh(["pgrep", "-af", `bash.*micke-`]);
-    expect(bashStrays.rc).not.toBe(0);
+    // ...and no session pidfiles/logs left behind
+    const leftovers = readdirSync(join(stateDir, "sessions"))
+      .filter((n) => n.endsWith(".json") || n.endsWith(".log"));
+    expect(leftovers).toEqual([]);
   },
-  120_000,
+  300_000,
 );
