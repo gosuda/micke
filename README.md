@@ -127,12 +127,18 @@ OpenCode's config (`opencode.json`):
     "servers": {
       "micke": {
         "type": "remote",
-        "url": "http://127.0.0.1:7800/mcp"
+        "url": "http://127.0.0.1:7800/mcp",
+        "oauth": false
       }
     }
   }
 }
 ```
+
+(`oauth: false` matters for OpenCode: remote servers default to OAuth, and
+against a no-auth loopback server the probe fails with a misleading
+`ECONNREFUSED` instead of just connecting — verified 2026-11-02. micke never
+emits 401, so there is nothing to authenticate.)
 
 (The daemon binds loopback only; clients and the daemon must share the host.
 Adjust the port if you set `MICKE_PORT`.)
