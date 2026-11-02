@@ -1,0 +1,17 @@
+{
+  "name": "micke-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "micke supervisor + MCP server (M-min phase 1)",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "test": "bun test tests/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
+  }
+}

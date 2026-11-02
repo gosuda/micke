@@ -88,6 +88,24 @@ rungv run --pull=never -m 2g -p 6080 micke:dev
 
 Early stage. The project is under active prototyping.
 
+## MCP server (M-min, phase 1)
+
+A supervisor + MCP server for the flow above lives in [`server/`](server/)
+(Bun + TypeScript; stdio transport; exactly four tools: `session_create`,
+`session_list`, `session_close`, `session_shell` — one persistent shell per
+session, which is how agents drive the desktop through `agent-desktop`).
+
+```sh
+cd server
+bun install
+bun run start
+```
+
+Every created session reports a `novnc_url` (host port chosen by Docker,
+loopback-only) for live view/intervention. See [server/README.md](server/README.md)
+for configuration, the shell-channel protocol, and the integration test
+(`bun test tests/mmin-phase1.test.ts`).
+
 ## License
 
 TBD
