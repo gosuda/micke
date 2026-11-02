@@ -100,8 +100,8 @@ bun start   # daemon on http://127.0.0.1:7800/ (MCP + dashboard; MICKE_PORT to c
 ```
 
 The daemon must be running before any MCP client connects (it does not
-auto-restart — see [docs/systemd-micke.service](docs/systemd-micke.service) for
-a systemd user unit that restarts it). Every created session reports a
+auto-restart — run it under a service manager such as systemd or launchd).
+Every created session reports a
 `novnc_url` (gvx-picked host port, loopback-only) for live view/intervention,
 and the daemon serves a static, no-JS session table at
 `http://127.0.0.1:7800/` (auto-refreshing; guards: instance lock, free-RAM

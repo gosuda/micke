@@ -1,6 +1,6 @@
 // tests/mmin-phase2.test.ts — M-min phase 2 verification: instance lock
-// (FR-19), free-RAM floor (FR-18), pull serialization (FR-31/32) and the
-// static dashboard (FR-23/24/25/29), end to end against real gvx.
+// free-RAM floor, pull serialization and the static dashboard, end to end
+// against real gvx.
 //
 // Run: bun test tests/mmin-phase2.test.ts
 // Needs network for the one pull-serialization check (rungv pull hello-world).
@@ -45,11 +45,11 @@ test("dashboard: empty table, meta refresh, localhost-only", async () => {
   const body = await res.text();
   expect(body).toContain('<meta http-equiv="refresh" content="5">');
   expect(body).toContain("no sessions");
-  expect(body).not.toContain("<script"); // no-JS is a requirement (FR-23)
+  expect(body).not.toContain("<script"); // no-JS is a requirement
 
   expect((await fetch(`http://127.0.0.1:${daemon.port}/other`)).status).toBe(404);
 
-  // localhost-only bind: a non-loopback interface must NOT reach it (FR-23).
+  // localhost-only bind: a non-loopback interface must NOT reach it.
   const ips = (await sh(["hostname", "-I"])).stdout.trim().split(/\s+/).filter((ip) => ip && ip !== "127.0.0.1");
   if (ips.length > 0) {
     await expect(fetch(`http://${ips[0]}:${daemon.port}/`)).rejects.toThrow();

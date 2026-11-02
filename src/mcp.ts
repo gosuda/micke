@@ -1,4 +1,4 @@
-// mcp — the ENTIRE agent-facing surface: exactly four tools (FR-5).
+// mcp — the ENTIRE agent-facing surface: exactly four tools.
 //
 // Uses the SDK's low-level Server API with plain JSON Schema (no zod), so
 // @modelcontextprotocol/sdk stays the single dependency.

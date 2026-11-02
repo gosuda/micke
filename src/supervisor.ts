@@ -85,7 +85,7 @@ export class Supervisor {
   // ---- lifecycle ----------------------------------------------------------
   //
   // create = validate cheaply, then run the whole pull+boot phase under ONE
-  // in-process mutex (FR-31/32): never two pulls, never a pull beside a live
+  // in-process mutex: never two pulls, never a pull beside a live
   // session, and concurrent creates of a missing image wait for one pull,
   // then all proceed.
 
@@ -323,7 +323,7 @@ export class Supervisor {
     return live.shellReady;
   }
 
-  // ---- image policy (FR-31/32) ---------------------------------------------
+  // ---- image policy --------------------------------------------------------
 
   /** Pull-if-missing. MUST run under the boot lock: one pull at a time, never beside a live session. */
   private async ensureImage(image: string): Promise<void> {
@@ -336,7 +336,7 @@ export class Supervisor {
       );
     }
     // A gvx pull compiles layers in memory: this lock is the OOM-avoidance
-    // mechanism (FR-31/32), not merely hygiene.
+    // mechanism, not merely hygiene.
     const r = await io.pullImage(image);
     if (r.rc !== 0) {
       throw new MickeError(
@@ -347,10 +347,10 @@ export class Supervisor {
     }
   }
 
-  // ---- guards (FR-18/19) ---------------------------------------------------
+  // ---- guards --------------------------------------------------------------
 
   /**
-   * Instance lock (FR-19): flock on <state dir>/supervisor.lock, held until
+   * Instance lock: flock on <state dir>/supervisor.lock, held until
    * process exit. Scoped to the state dir because that is the shared state a
    * second supervisor would corrupt (pidfiles + their sandboxes); the default
    * config locks ~/.local/state/micke/supervisor.lock as specified.
@@ -386,7 +386,7 @@ export class Supervisor {
   }
 
   /**
-   * Free-RAM floor (FR-18): refuse new sessions when MemAvailable is below
+   * Free-RAM floor: refuse new sessions when MemAvailable is below
    * MICKE_MIN_FREE_MB (default 1024; 0 or invalid disables; /proc/meminfo
    * missing → skip, i.e. non-Linux hosts fail open).
    */
@@ -411,7 +411,7 @@ export class Supervisor {
     }
   }
 
-  /** Serialize a pull+boot phase against all others (FR-31/32 mutex). */
+  /** Serialize a pull+boot phase against all others (boot mutex). */
   private withBootLock<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.bootLock.then(fn);
     this.bootLock = run.then(() => {}, () => {});

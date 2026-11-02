@@ -1,4 +1,4 @@
-// dashboard — the ONE static route (FR-23/24/25/29): a no-JS HTML table of
+// dashboard — the ONE static route: a no-JS HTML table of
 // sessions, auto-refreshed by a meta tag. Rendered by main.ts's `/` route on
 // the daemon port (127.0.0.1, loopback-only bind). No framework, no build
 // step, no extra deps — a template literal. Diagnostics go to stderr, like

@@ -82,7 +82,7 @@ jobs:
           outputs: type=image,name=ghcr.io/gosuda/micke,push-by-digest=true,name-canonical=true,push=true
           # The merge job assembles the final manifest list from these
           # single-platform digests; keep attestations out until signing
-          # (FR-36) so the index is exactly the two platform manifests.
+          # so the index is exactly the two platform manifests.
           provenance: false
           cache-from: type=gha,scope=micke-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}

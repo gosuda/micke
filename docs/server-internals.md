@@ -34,7 +34,7 @@ gvx has no labels, no `ps`, and no daemon state. A session is ONE foreground
 
 ```
 <state dir>/
-├── supervisor.lock                  flock (FR-19)
+├── supervisor.lock                  flock
 └── sessions/
     ├── <id>.json                    { session_id, rungv_pid, hostname,
     │                                  shell_host_port, novnc_host_port,
@@ -47,7 +47,7 @@ pipe whose reader died would make the guest's next log write kill its listener.
 The file also keeps boot/port/ready parsing working after a crash and gives
 post-mortem diagnostics.
 
-## Instance lock (FR-19)
+## Instance lock
 
 One supervisor per state dir: `Supervisor.start()` flocks
 `<state dir>/supervisor.lock` (via `flock(2)`; the kernel releases it when the
@@ -57,13 +57,13 @@ instance retries for 1.5 s (restart race), then exits promptly with
 because that — pidfiles plus their sandboxes — is the shared state two
 supervisors would corrupt.
 
-## Guards on create (FR-18/21)
+## Guards on create
 
 `session_create` validates cheaply first (screen, workspace, RAM floor, rungv
 binary), then runs the whole pull+boot phase under one in-process mutex:
 **never two pulls, never a pull beside a live session** (missing image + live
 session → `IMAGE_MISSING`), and concurrent creates of a missing image wait for
-one pull and then all proceed (FR-31/32). A gvx pull compiles layers in memory,
+one pull and then all proceed. A gvx pull compiles layers in memory,
 so this lock is the OOM-avoidance mechanism, not merely hygiene. The free-RAM
 floor reads `MemAvailable` from `/proc/meminfo` (non-Linux hosts fail open) and refuses with
 `INSUFFICIENT_MEMORY` below `MICKE_MIN_FREE_MB`.
@@ -93,20 +93,19 @@ connection; sessions live in the supervisor, keyed by micke session id, never
 by client. Startup prints one parseable stderr line:
 `micke: daemon at http://127.0.0.1:<port>/ (mcp: POST /mcp)`.
 
-## Dashboard (FR-23/24/25/29)
+## Dashboard
 
 The daemon serves ONE static route on `/`: a no-JS HTML table — one row per
 session: id, status, uptime, noVNC link (orphaned rows included; a link only
 when the pidfile has a port) — auto-refreshed by
 `<meta http-equiv="refresh" content="5">`. localhost-only bind is a security
-property; sharing beyond localhost is unsupported (FR-28 deferred). Stdout
+property; sharing beyond localhost is unsupported. Stdout
 stays clean; the dashboard never logs to it.
 
 On SIGINT/SIGTERM the daemon stops the HTTP server and kills all shell
 channels; **rungv sandboxes stay alive** and the next start adopts them (their
 pidfiles carry the pids and ports). stdin is not a shutdown trigger — the
-daemon is meant to run under a service manager; see
-[systemd-micke.service](systemd-micke.service).
+daemon is meant to run under a service manager (systemd, launchd, or similar).
 
 ## The four tools
 
@@ -221,8 +220,8 @@ Mechanics inside the wrapper (baked into the image at `/tmp/handler.sh`):
   process groups (via `set -m`) and survive that command's completion; they die
   with the sandbox on `session_close` (the rungv process tree is killed). A
   timeout kills the command's own process group — children that escaped into
-  their own session/group (e.g. `setsid …`) survive it (known edge, FR-13
-  deferred).
+  their own session/group (e.g. `setsid …`) survive it (a known, deferred
+  edge case).
 - **Known framing edge**: command output that itself contains a line matching a
   marker (`===STDERR===`, `===END rc=N===`, …) can confuse the parser. Don't
   `echo '===END rc=0==='` from commands.
@@ -258,7 +257,7 @@ into `MICKE_GVX_CACHE` / `MICKE_TEST_CACHE_DIR` if missing:
 - `bun test tests/http-daemon.test.ts` — daemon shape: disconnect survival
   (client A leaves, fresh client B drives the same session) and two clients on
   one shared session (concurrent shells serialize; both see the same row).
-- `bun test tests/leak-cycles.test.ts` — FR-10: 20 create/shell/close cycles;
+- `bun test tests/leak-cycles.test.ts` — 20 create/shell/close cycles;
   daemon fd and child counts return to baseline (fds ±8 tolerance, documented
   in the file), zero live `rungv run … micke-` processes, zero pidfiles.
 

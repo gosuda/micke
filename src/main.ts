@@ -1,6 +1,6 @@
 // main — micke daemon: supervisor + MCP over Streamable HTTP + dashboard,
 // ONE Bun.serve on 127.0.0.1:$MICKE_PORT (default 7800; loopback-only bind is
-// a security property, FR-23).
+// a security property).
 //
 // Run: bun run src/main.ts  (or: bun run start)
 // Routes: POST /mcp (stateless MCP), GET / (dashboard), anything else 404.

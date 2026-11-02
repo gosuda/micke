@@ -26,7 +26,7 @@ call — and hand the desk back.
    agent-desktop snapshot --app chromium -i --compact   # assert on refs/titles, then continue
    ```
 
-## Input arbitration is a known hazard (FR-48)
+## Input arbitration is a known hazard
 
 The human and the agent share **one X display and one focused window**. There
 is no arbitration: if the agent types or clicks while the human's hand is on

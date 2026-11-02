@@ -281,7 +281,7 @@ export function spawnSession(o: SpawnOptions): SessionProcess {
     "-p", String(SHELL_GUEST_PORT),
     "-p", String(NOVNC_GUEST_PORT),
   ];
-  // Optional classic-VNC password (FR-43); copy from the daemon's environment.
+  // Optional classic-VNC password; copy from the daemon's environment.
   if (process.env.MICKE_VNC_PASSWORD) args.push("-e", "MICKE_VNC_PASSWORD");
   if (o.workspace) args.push("-v", `${o.workspace}:/workspace`);
   args.push(o.image);

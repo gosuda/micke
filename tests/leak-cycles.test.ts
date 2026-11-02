@@ -1,4 +1,4 @@
-// tests/leak-cycles.test.ts — FR-10 verification: repeated create/shell/close
+// tests/leak-cycles.test.ts — verification: repeated create/shell/close
 // cycles must leave nothing behind. 20 cycles of
 // create -> one shell command -> close, then:
 //   - supervisor fd count back to baseline (±FD_TOLERANCE — documented below)
@@ -87,7 +87,7 @@ afterAll(async () => {
 }, 60_000);
 
 test(
-  `FR-10: ${CYCLES} create/shell/close cycles leave no fds, processes, or sandboxes behind`,
+  `${CYCLES} create/shell/close cycles leave no fds, processes, or sandboxes behind`,
   async () => {
     const t0 = Date.now();
     let cycleMs = 0;
