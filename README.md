@@ -27,6 +27,29 @@ AI Agent ──MCP──> micke server ──> Linux desktop container
 - **Agent-friendly**: tools designed for screen understanding and precise input control.
 - **Reproducible**: deterministic container images so agents get the same desk every time.
 
+## Quick start
+
+```sh
+docker build -t micke .
+
+# boot a desk (--shm-size is for Chromium)
+docker run -d --name micke --init --shm-size=1g micke
+
+# talk to the desktop through agent-desktop
+docker exec micke bash -c '. /tmp/session.env && agent-desktop status'
+docker exec micke bash -c '. /tmp/session.env && agent-desktop list-apps'
+
+# launch and drive a browser
+docker exec micke bash -c '. /tmp/session.env && \
+    agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility https://example.com && \
+    agent-desktop snapshot --app chromium -i'
+```
+
+The desktop inside the container is driven by
+[agent-desktop](https://github.com/vercel-labs/agent-desktop): it reads and
+operates apps through the AT-SPI accessibility tree with stable refs, no
+pixel matching.
+
 ## Status
 
 Early stage. The project is under active prototyping.
