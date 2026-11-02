@@ -9,8 +9,8 @@ call — and hand the desk back.
 1. **The agent announces the pause** — in its own words, to the human, naming
    the session: e.g. "I'm paused on session `a1b2c3d4` at the SSO login; I
    need a human to log in over noVNC."
-2. **The human opens that session's noVNC URL** — from `session_list` (every
-   row carries `novnc_url`) or the dashboard table at
+2. **The human opens that session's noVNC URL** — from `session_list` (live
+   rows carry `novnc_url`) or the dashboard table at
    `http://127.0.0.1:7800/` (one row per session, link in the last column).
    The browser shows and can drive the live desktop.
 3. **The human acts** — e.g. completes the SSO login. The credential goes

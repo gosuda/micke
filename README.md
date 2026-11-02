@@ -9,21 +9,24 @@ When an AI agent creates a new session via MCP (Model Context Protocol), micke p
 ## How it works
 
 ```
-AI Agent ──MCP──> micke server ──> Linux desktop container
+AI agent ──MCP──> micke daemon ──> Linux desktop container (Xvfb :99 + openbox + AT-SPI
+                (4 tools)         + chromium + x11vnc/noVNC), one per session
                                         │
-                                   X11 / Wayland
-                                   noVNC / screenshot streaming
+                                        agent-desktop (AT-SPI a11y tree: snapshot →
+                                        act on @ref → wait), driven through the
+                                        session's ONE persistent shell
+                                        x11vnc/noVNC mirror of the display for humans
 ```
 
-1. **Session create** — the agent calls the `session.create` MCP tool.
-2. **Container spawn** — micke boots a lightweight Linux desktop (e.g. Xfce) in an isolated container.
-3. **Interaction** — the agent controls the desktop through MCP tools (`click`, `type`, `screenshot`, ...) backed by X11/VNC automation.
+1. **Session create** — the agent calls the `session_create` MCP tool.
+2. **Container spawn** — micke boots a real Linux desktop (Xvfb + openbox + AT-SPI, chromium preinstalled) in an isolated container.
+3. **Interaction** — the agent drives everything through `session_shell` (the one persistent bash per session): `agent-desktop` snapshot → act on `@ref` → wait loops, plus any CLI work.
 4. **Session close** — the container is destroyed, leaving nothing behind.
 
 ## Goals
 
 - **Local-first**: everything runs on your machine. No cloud, no telemetry.
-- **One session, one desk**: each MCP session gets a fresh, disposable desktop container.
+- **One session, one desk**: every `session_create` call gets a fresh, disposable desktop container (MCP transport itself is stateless).
 - **Agent-friendly**: tools designed for screen understanding and precise input control.
 - **Reproducible**: deterministic container images so agents get the same desk every time.
 
@@ -32,6 +35,9 @@ AI Agent ──MCP──> micke server ──> Linux desktop container
 ```sh
 # The Dockerfile lives in image/; the build context stays the repo root.
 docker build -t micke -f image/Dockerfile .
+
+# CI also publishes the image to ghcr.io/gosuda/micke (.github/workflows/image.yml);
+# pull that and set MICKE_IMAGE=ghcr.io/gosuda/micke:latest instead of building.
 
 # boot a desk (--shm-size is for Chromium)
 docker run -d --name micke --init --shm-size=1g micke
@@ -89,7 +95,7 @@ rungv run --pull=never -m 2g -p 6080 micke:dev
 
 Early stage. The project is under active prototyping.
 
-## MCP server (M-min, phase 1)
+## MCP server (M-min, shipped)
 
 A supervisor + MCP daemon for the flow above lives in [`src/`](src/) (Bun +
 TypeScript; MCP over Streamable HTTP; exactly four tools: `session_create`,

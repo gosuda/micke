@@ -2,14 +2,16 @@
 
 The supervisor + MCP daemon: one process, exactly four tools, MCP over
 stateless Streamable HTTP. Stack: Bun + TypeScript (no build step), single
-runtime dependency (`@modelcontextprotocol/sdk`); Docker is driven by shelling
-out to the `docker` CLI. The same process serves the static session dashboard
-on the same loopback port (see below).
+runtime dependency (`@modelcontextprotocol/sdk`, 1.32.2); Docker is driven by
+shelling out to the `docker` CLI. The same process serves the static session
+dashboard on the same loopback port (see below).
 
 For how to run it, see the root [README.md](../README.md).
 
 Requirements: Linux host, Docker reachable by this user, and a local micke
-image (`docker tag micke:novnc micke:latest`, or set `MICKE_IMAGE`).
+image — build it from the repo root (`docker build -t micke -f image/Dockerfile .`),
+or pull the CI-published ref and point `MICKE_IMAGE` at it (e.g.
+`ghcr.io/gosuda/micke:latest`).
 
 Environment:
 
@@ -86,15 +88,16 @@ run under a service manager; see [systemd-micke.service](systemd-micke.service).
 | Tool             | Input                                            | Returns |
 | :--              | :--                                              | :--     |
 | `session_create` | `{image?, workspace?, screen?}`                  | `{session_id, status: "ready", novnc_url, container_id, image, workspace, screen, …}` |
-| `session_list`   | `{}`                                             | `{sessions: […]}` — every row carries `novnc_url`; containers from previous supervisor runs appear as `status: "orphaned"` |
+| `session_list`   | `{}`                                             | `{sessions: […]}` — rows carry `novnc_url` (`null` when no port is discoverable); containers from previous supervisor runs appear as `status: "orphaned"` |
 | `session_close`  | `{session_id}`                                   | `{closed, container_removed}` — also reaps orphans |
-| `session_shell`  | `{session_id, command, timeout_ms?, max_output_bytes?}` | `{stdout, stderr, rc, timed_out, truncated, duration_ms}` |
+| `session_shell`  | `{session_id, command, timeout_ms?, max_output_bytes?}` | `{session_id, stdout, stderr, rc, timed_out, truncated, duration_ms}` |
 
 All failures return one JSON error shape as MCP tool errors:
 `{code, message, hint}` — codes: `IMAGE_MISSING`, `WORKSPACE_INVALID`,
 `SCREEN_INVALID`, `DESKTOP_BOOT_TIMEOUT`, `DOCKER_UNAVAILABLE`, `DOCKER_ERROR`,
 `SESSION_NOT_FOUND`, `SESSION_ORPHANED`, `SHELL_UNAVAILABLE`, `BAD_ARGUMENT`,
-`INSUFFICIENT_MEMORY`, `UNKNOWN_TOOL`; fatal startup failures exit the process
+`INSUFFICIENT_MEMORY`, `UNKNOWN_TOOL`, plus `INTERNAL` as the catch-all for
+unexpected (non-Micke) exceptions; fatal startup failures exit the process
 with `LOCK_HELD` (second supervisor on the same state dir) or `PORT_HELD`
 (daemon port already bound) on stderr.
 
@@ -107,7 +110,8 @@ outliving the supervisor are listed as `orphaned` on the next start. Orphans
 remain list/close-only for now — `session_shell` on one returns
 `SESSION_ORPHANED`, `session_close` reaps it; re-attach lands with the gvx
 runtime swap (owner decision, [research/gvx-only-analysis.md](research/gvx-only-analysis.md) §10 —
-Docker-specific re-attach machinery is throwaway). Pull policy (FR-31/32):
+Docker-specific re-attach machinery is throwaway; the swap itself is designed
+in [research/gvx-runtime-design.md](research/gvx-runtime-design.md)). Pull policy (FR-31/32):
 pull-if-missing before a session starts, under the create/boot mutex — one
 pull at a time, never while any session is live; sessions always run
 cache-only (`--pull=never`).
@@ -165,7 +169,10 @@ Mechanics inside the wrapper:
   `echo '===END rc=0==='` from commands.
 - The channel is strictly serialized (one in-flight command per session). The
   host hard-aborts (and kills the channel) if no frame arrives within
-  `timeout_ms + 15 s`; the shell is not auto-respawned (Phase 2).
+  `max(timeout_ms, 1 s) + 15 s` (the container-side watchdog should fire
+  first; the backstop covers a channel gone silent); the shell is not
+  auto-respawned — the next `session_shell` returns `SHELL_UNAVAILABLE`
+  (close and re-create the session).
 
 The channel dies with `session_close` and with supervisor exit (SIGTERM kills
 the `docker exec` clients; containers stay and show up as `orphaned` on the
