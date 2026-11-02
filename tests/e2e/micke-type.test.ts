@@ -49,7 +49,9 @@ describe.skipIf(!E2E)("e2e: micke-type", () => {
     const write = await shell("cat > /tmp/type-probe.html <<'EOF'\n<!doctype html>\n<html><head><title>type-probe</title></head>\n<body><h1>type probe</h1>\n<input aria-label=\"probe-field\" type=\"text\" size=\"40\">\n</body></html>\nEOF\n");
     expect(write.rc).toBe(0);
 
-    const launch = JSON.parse((await shell("micke-chromium file:///tmp/type-probe.html", { timeout_ms: 60_000 })).stdout);
+    // micke-chromium appends a `micke: next` pointer line after a successful
+    // launch, so the envelope is the FIRST stdout line, not the whole output.
+    const launch = JSON.parse((await shell("micke-chromium file:///tmp/type-probe.html", { timeout_ms: 60_000 })).stdout.trim().split("\n")[0]);
     expect(launch.ok).toBe(true);
 
     const wait = JSON.parse((await shell(

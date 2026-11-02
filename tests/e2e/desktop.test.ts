@@ -44,7 +44,9 @@ describe.skipIf(!E2E)("e2e: desktop smoke", () => {
     const status = JSON.parse((await shell("agent-desktop status", { timeout_ms: 30_000 })).stdout);
     expect(status.data.permissions.accessibility.state).toBe("granted");
 
-    const launch = JSON.parse((await shell("micke-chromium https://example.com", { timeout_ms: 60_000 })).stdout);
+    // micke-chromium appends a `micke: next` pointer line after a successful
+    // launch, so the envelope is the FIRST stdout line, not the whole output.
+    const launch = JSON.parse((await shell("micke-chromium https://example.com", { timeout_ms: 60_000 })).stdout.trim().split("\n")[0]);
     expect(launch.ok).toBe(true);
 
     const wait = JSON.parse((await shell(

@@ -43,10 +43,22 @@ case "${1:-}" in
     *) url="$1"; shift ;; # first non --arg= word is the URL
 esac
 
-exec agent-desktop launch chromium \
+# No exec: stdout is captured so a SUCCESSFUL launch can append one pointer
+# line after the receipt — the receipt is the one surface every agent reads
+# (mission evidence), so the loop's next steps ride on it. A failed launch
+# adds nothing. The envelope line itself is unchanged and stays first.
+set +e
+out=$(agent-desktop launch chromium \
     --arg=--no-sandbox \
     --arg=--force-renderer-accessibility \
     --arg=--enable-logging \
     --arg=--log-file=/tmp/chromium.log \
     ${url:+"--arg=$url"} \
-    "$@"
+    "$@")
+rc=$?
+set -e
+printf '%s\n' "$out"
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
+echo "micke: next — micke-find '<text>' to locate · micke-type '<text>' to type (click field first) · micke-state to verify · micke-help for the loop"

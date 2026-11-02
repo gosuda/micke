@@ -76,3 +76,77 @@ describe("agent-desktop exit-code contract", () => {
     expect(r.rc).toBe(0);
   });
 });
+
+describe("agent-desktop point-of-use hints (stderr only)", () => {
+  test("press gets one pre-warning line on stderr and still executes", () => {
+    const out = `{"version":"2.5","ok":true,"command":"press","data":{"combo":"Return"}}`;
+    const r = run(out, 0, ["press", "Return"]);
+    expect(r.stderr).toContain("SIGSEGV");
+    expect(r.stderr).toContain("micke-key");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1); // one line, and only that
+    expect(r.stderr.startsWith("micke:")).toBe(true);
+    expect(r.rc).toBe(0);           // warned, never blocked
+    expect(r.stdout).toBe(out + "\n"); // envelope untouched
+  });
+
+  test("type POLICY_DENIED appends the micke-type remedy on stderr", () => {
+    const out = `{"version":"2.5","ok":false,"command":"type","error":{"code":"POLICY_DENIED","message":"Typing is only allowed with --headed"}}`;
+    const r = run(out, 0, ["type", "hello"]);
+    expect(r.rc).toBe(1);
+    expect(r.stdout).toBe(out + "\n");   // stdout stays byte-identical
+    expect(r.stderr).toContain("micke-type");
+    expect(r.stderr).toContain("--headed type");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  test("set-value ACTION_NOT_SUPPORTED gets the same remedy", () => {
+    const out = `{"version":"2.5","ok":false,"command":"set-value","error":{"code":"ACTION_NOT_SUPPORTED","message":"set-value is not supported"}}`;
+    const r = run(out, 0, ["set-value", "@snap:1", "hello"]);
+    expect(r.rc).toBe(1);
+    expect(r.stdout).toBe(out + "\n");
+    expect(r.stderr).toContain("micke-type");
+    expect(r.stderr).toContain("--headed type");
+  });
+
+  test("type POLICY_DENIED still gets the remedy when the CLI itself exits non-zero", () => {
+    // The real CLI reports this refusal with rc 1 (measured on the image);
+    // the remedy must ride along on both shapes of a failed call.
+    const out = `{"version":"2.5","ok":false,"command":"type","error":{"code":"POLICY_DENIED","message":"Target is not actionable"}}`;
+    const r = run(out, 1, ["type", "@s:e65", "hello"]);
+    expect(r.rc).toBe(1); // pass-through rc, not rewritten
+    expect(r.stdout).toBe(out + "\n");
+    expect(r.stderr).toContain("micke-type");
+  });
+
+  test("find failure (TIMEOUT) gets the micke-find hint on stderr", () => {
+    const out = `{"version":"2.5","ok":false,"command":"find","error":{"code":"TIMEOUT","message":"tree never stabilized"}}`;
+    const r = run(out, 0, ["find", "login"]);
+    expect(r.rc).toBe(1);
+    expect(r.stdout).toBe(out + "\n");
+    expect(r.stderr).toContain("micke-find");
+    expect(r.stderr).toContain("--role");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  test("successful envelopes stay hint-free on stderr", () => {
+    const out = `{"version":"2.5","ok":true,"command":"type","data":{}}`;
+    const r = run(out, 0, ["type", "hi"]);
+    expect(r.rc).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(out + "\n");
+  });
+
+  test("ok:false with an unrelated command/code adds no hint", () => {
+    const out = `{"version":"2.5","ok":false,"command":"click","error":{"code":"REF_NOT_FOUND"}}`;
+    const r = run(out, 0, ["click", "@snap:1"]);
+    expect(r.rc).toBe(1);
+    expect(r.stderr).toBe("");
+  });
+
+  test("type refused with another code (TIMEOUT) adds no remedy", () => {
+    const out = `{"version":"2.5","ok":false,"command":"type","error":{"code":"TIMEOUT"}}`;
+    const r = run(out, 0, ["type", "x"]);
+    expect(r.rc).toBe(1);
+    expect(r.stderr).toBe(""); // POLICY_DENIED / ACTION_NOT_SUPPORTED only
+  });
+});
