@@ -58,11 +58,11 @@ RUN npm install -g agent-desktop && agent-desktop version
 RUN groupadd -g "$GID" "$USERNAME" \
     && useradd -m -u "$UID" -g "$GID" -s /bin/bash "$USERNAME"
 
-COPY entrypoint.sh /usr/local/bin/micke-entrypoint
+COPY image/entrypoint.sh /usr/local/bin/micke-entrypoint
 RUN chmod 0755 /usr/local/bin/micke-entrypoint
 
 # Preferred chromium launch path: flags pre-baked (see micke-chromium.sh).
-COPY micke-chromium.sh /usr/local/bin/micke-chromium
+COPY image/micke-chromium.sh /usr/local/bin/micke-chromium
 RUN chmod 0755 /usr/local/bin/micke-chromium
 
 USER $USERNAME

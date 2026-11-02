@@ -2,7 +2,7 @@
 //
 // The container-side bash is initialized with a `__micke_run` wrapper (below).
 // The host writes one request line per command and parses the frame that comes
-// back. Protocol (documented in server/README.md):
+// back. Protocol (documented in docs/server-internals.md):
 //
 //   host -> container:  __micke_run <timeout_ms> <max_output_bytes> <base64-cmd>\n
 //   container -> host:

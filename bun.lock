@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "micke-server",
+      "name": "micke",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.0.0",
       },

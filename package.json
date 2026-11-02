@@ -1,5 +1,5 @@
 {
-  "name": "micke-server",
+  "name": "micke",
   "version": "0.1.0",
   "private": true,
   "description": "micke supervisor + MCP server (M-min phase 1)",

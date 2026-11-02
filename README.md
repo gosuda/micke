@@ -30,7 +30,8 @@ AI Agent ──MCP──> micke server ──> Linux desktop container
 ## Quick start
 
 ```sh
-docker build -t micke .
+# The Dockerfile lives in image/; the build context stays the repo root.
+docker build -t micke -f image/Dockerfile .
 
 # boot a desk (--shm-size is for Chromium)
 docker run -d --name micke --init --shm-size=1g micke
@@ -90,23 +91,22 @@ Early stage. The project is under active prototyping.
 
 ## MCP server (M-min, phase 1)
 
-A supervisor + MCP server for the flow above lives in [`server/`](server/)
-(Bun + TypeScript; stdio transport; exactly four tools: `session_create`,
+A supervisor + MCP server for the flow above lives in [`src/`](src/) (Bun +
+TypeScript; stdio transport; exactly four tools: `session_create`,
 `session_list`, `session_close`, `session_shell` — one persistent shell per
 session, which is how agents drive the desktop through `agent-desktop`).
 
 ```sh
-cd server
 bun install
-bun run start
+bun start
 ```
 
 Every created session reports a `novnc_url` (host port chosen by Docker,
 loopback-only) for live view/intervention, and the supervisor serves a static,
 no-JS session table at `http://127.0.0.1:7800/` (auto-refreshing; guards:
 instance lock, free-RAM floor, serialized image pulls).
-See [server/README.md](server/README.md) for configuration, the shell-channel
-protocol, and the integration tests (`bun test tests/`).
+See [docs/server-internals.md](docs/server-internals.md) for configuration,
+the shell-channel protocol, and the integration tests (`bun test tests/`).
 
 - Driving chromium in a session — required flags, `--arg=` passthrough,
   /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
@@ -125,7 +125,7 @@ config (`opencode.json`):
       "micke": {
         "type": "local",
         "command": ["bun", "run", "src/main.ts"],
-        "cwd": "<repo>/server"
+        "cwd": "<repo>"
       }
     }
   }
@@ -133,7 +133,7 @@ config (`opencode.json`):
 ```
 
 (`bun` must be on the client's PATH — or give its absolute path — and the
-`cwd` must point at this repo's `server/` directory.)
+`cwd` must point at this repo's root directory.)
 
 ## License
 

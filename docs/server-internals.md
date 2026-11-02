@@ -1,4 +1,4 @@
-# micke server (M-min)
+# micke server internals (M-min)
 
 The supervisor + MCP server: one process, stdio transport, exactly four tools.
 Stack: Bun + TypeScript (no build step), single runtime dependency
@@ -6,18 +6,7 @@ Stack: Bun + TypeScript (no build step), single runtime dependency
 CLI. The same process also serves the static session dashboard on
 127.0.0.1 (see below).
 
-## Run
-
-```sh
-bun install
-bun run start            # or: bun run src/main.ts
-```
-
-The server speaks MCP on stdio, so point an MCP client at it, e.g.:
-
-```json
-{ "mcpServers": { "micke": { "command": "bun", "args": ["run", "/path/to/micke/server/src/main.ts"] } } }
-```
+For how to run it, see the root [README.md](../README.md).
 
 Requirements: Linux host, Docker reachable by this user, and a local micke
 image (`docker tag micke:novnc micke:latest`, or set `MICKE_IMAGE`).
