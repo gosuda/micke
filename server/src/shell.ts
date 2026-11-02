@@ -333,6 +333,9 @@ export class ShellChannel {
     if (proc) {
       try { proc.stdin?.end(); } catch { /* already closed */ }
       try { proc.kill(9); } catch { /* already gone */ }
+      // Reap (also on the error paths below): a killed-but-unawaited child
+      // could linger as a zombie and show up in leak-cycle counts (FR-10).
+      void proc.exited.then(() => {}, () => {});
     }
   }
 }

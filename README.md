@@ -102,9 +102,16 @@ bun run start
 ```
 
 Every created session reports a `novnc_url` (host port chosen by Docker,
-loopback-only) for live view/intervention. See [server/README.md](server/README.md)
-for configuration, the shell-channel protocol, and the integration test
-(`bun test tests/mmin-phase1.test.ts`).
+loopback-only) for live view/intervention, and the supervisor serves a static,
+no-JS session table at `http://127.0.0.1:7800/` (auto-refreshing; guards:
+instance lock, free-RAM floor, serialized image pulls).
+See [server/README.md](server/README.md) for configuration, the shell-channel
+protocol, and the integration tests (`bun test tests/`).
+
+- Driving chromium in a session — required flags, `--arg=` passthrough,
+  /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
+- Pausing so a human can log in over noVNC (credentials never enter the
+  transcript): [docs/manual-intervention.md](docs/manual-intervention.md)
 
 ## License
 

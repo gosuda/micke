@@ -6,11 +6,24 @@
 // `orphaned`; reaped via session_close). All failures surface as MickeError
 // with one JSON shape: {code, message, hint}.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, writeSync, closeSync, ftruncateSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import { dlopen } from "bun:ffi";
 import * as io from "./dockerio.js";
 import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from "./shell.js";
+
+// flock(2) via FFI: the kernel releases the lock when this process dies, so a
+// crashed supervisor never leaves a stale lock behind (no pid-file recovery).
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const flock: ((fd: number, op: number) => number) | null = (() => {
+  try {
+    return dlopen("libc.so.6", { flock: { args: ["i32", "i32"], returns: "i32" } }).symbols.flock;
+  } catch {
+    return null; // non-Linux / no libc — no lock (micke targets Linux hosts)
+  }
+})();
 
 export class MickeError extends Error {
   constructor(
@@ -64,7 +77,8 @@ export class Supervisor {
   private sessions = new Map<string, LiveSession>();
   private orphanStates = new Map<string, SessionState>();
   private stateFile: string;
-  private pullLock: Promise<void> = Promise.resolve();
+  private bootLock: Promise<void> = Promise.resolve();
+  private lockFd: number | null = null;
 
   constructor() {
     const base = process.env.MICKE_STATE_DIR
@@ -74,11 +88,17 @@ export class Supervisor {
   }
 
   async start(): Promise<void> {
+    await this.acquireLock();
     this.loadState();
     await this.scanOrphans();
   }
 
   // ---- lifecycle ----------------------------------------------------------
+  //
+  // create = validate cheaply, then run the whole pull+boot phase under ONE
+  // in-process mutex (FR-31/32): never two pulls, never a pull beside a live
+  // session, and concurrent creates of a missing image wait for one pull,
+  // then all proceed.
 
   async createSession(opts: { image?: string; workspace?: string; screen?: string }): Promise<SessionRow> {
     const image = opts.image || process.env.MICKE_IMAGE || DEFAULT_IMAGE;
@@ -93,9 +113,14 @@ export class Supervisor {
         throw new MickeError("WORKSPACE_INVALID", `workspace "${workspace}" must be an absolute host path that exists`, `It is bind-mounted at /workspace (-v ${workspace}:/workspace).`);
       }
     }
+    this.checkMemoryFloor();
     if (!(await io.dockerAvailable())) {
       throw new MickeError("DOCKER_UNAVAILABLE", "docker daemon is not reachable", "Is dockerd running and does this user have access (docker ps)?");
     }
+    return this.withBootLock(() => this.bootSession(image, workspace, screen));
+  }
+
+  private async bootSession(image: string, workspace: string | null, screen: string): Promise<SessionRow> {
     await this.ensureImage(image);
 
     const id = randId();
@@ -203,8 +228,9 @@ export class Supervisor {
     for (const s of this.sessions.values()) s.shell?.kill();
   }
 
-  // ---- image policy (FR-31/32, basic) --------------------------------------
+  // ---- image policy (FR-31/32) ---------------------------------------------
 
+  /** Pull-if-missing. MUST run under the boot lock: one pull at a time, never beside a live session. */
   private async ensureImage(image: string): Promise<void> {
     if (await io.imageExists(image)) return;
     if (this.sessions.size > 0) {
@@ -214,15 +240,81 @@ export class Supervisor {
         `Close live sessions first, or run: docker pull ${image}`,
       );
     }
-    const task = this.pullLock.then(async () => {
-      if (await io.imageExists(image)) return; // another create pulled it while queued
-      const r = await io.pullImage(image);
-      if (r.rc !== 0) {
-        throw new MickeError("IMAGE_MISSING", `image "${image}" missing locally and docker pull failed: ${r.stderr.trim().slice(0, 300)}`, `docker pull ${image}`);
+    const r = await io.pullImage(image);
+    if (r.rc !== 0) {
+      throw new MickeError("IMAGE_MISSING", `image "${image}" missing locally and docker pull failed: ${r.stderr.trim().slice(0, 300)}`, `docker pull ${image}`);
+    }
+  }
+
+  // ---- guards (FR-18/19) ---------------------------------------------------
+
+  /**
+   * Instance lock (FR-19): flock on <state dir>/supervisor.lock, held until
+   * process exit. Scoped to the state dir because that is the shared state a
+   * second supervisor would corrupt (sessions.json + its containers); the
+   * default config locks ~/.local/state/micke/supervisor.lock as specified.
+   */
+  private async acquireLock(): Promise<void> {
+    if (!flock) {
+      console.error("micke: warning: flock(2) unavailable — running without the instance lock");
+      return;
+    }
+    const path = join(dirname(this.stateFile), "supervisor.lock");
+    const fd = openSync(path, "a"); // create if missing; never truncates — the holder's pid must stay readable
+    // A previous instance may be mid-exit (restart race): retry briefly before refusing.
+    const deadline = Date.now() + 1_500;
+    for (;;) {
+      if (flock(fd, LOCK_EX | LOCK_NB) === 0) {
+        ftruncateSync(fd, 0); // drop any stale pid from a crashed predecessor
+        writeSync(fd, `${process.pid}\n`);
+        this.lockFd = fd; // keep the fd open for the process lifetime
+        return;
       }
-    });
-    this.pullLock = task.catch(() => {});
-    await task;
+      if (Date.now() >= deadline) {
+        closeSync(fd);
+        let holder = "unknown";
+        try { holder = readFileSync(path, "utf8").trim() || "unknown"; } catch { /* empty */ }
+        throw new MickeError(
+          "LOCK_HELD",
+          `another micke supervisor (pid ${holder}) holds ${path}`,
+          "One supervisor per state dir owns port allocation and pulls; stop the other instance first.",
+        );
+      }
+      await Bun.sleep(100);
+    }
+  }
+
+  /**
+   * Free-RAM floor (FR-18): refuse new sessions when MemAvailable is below
+   * MICKE_MIN_FREE_MB (default 1024; 0 or invalid disables; /proc/meminfo
+   * missing → skip, i.e. non-Linux hosts fail open).
+   */
+  private checkMemoryFloor(): void {
+    const floorMb = parseInt(process.env.MICKE_MIN_FREE_MB || "1024", 10);
+    if (!Number.isFinite(floorMb) || floorMb <= 0) return;
+    let meminfo: string;
+    try {
+      meminfo = readFileSync("/proc/meminfo", "utf8");
+    } catch {
+      return;
+    }
+    const m = meminfo.match(/^MemAvailable:\s+(\d+) kB$/m);
+    if (!m) return;
+    const availMb = Math.floor(parseInt(m[1], 10) / 1024);
+    if (availMb < floorMb) {
+      throw new MickeError(
+        "INSUFFICIENT_MEMORY",
+        `host has ${availMb} MiB free (MemAvailable), below the ${floorMb} MiB floor`,
+        "Close sessions (each chromium session holds ~500 MiB), free host RAM, or lower MICKE_MIN_FREE_MB (0 disables the floor).",
+      );
+    }
+  }
+
+  /** Serialize a pull+boot phase against all others (FR-31/32 mutex). */
+  private withBootLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.bootLock.then(fn);
+    this.bootLock = run.then(() => {}, () => {});
+    return run;
   }
 
   // ---- persistence ----------------------------------------------------------

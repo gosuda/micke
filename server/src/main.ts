@@ -5,11 +5,24 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Supervisor } from "./supervisor.js";
+import { MickeError, Supervisor } from "./supervisor.js";
+import { startDashboard } from "./dashboard.js";
 import { registerTools } from "./mcp.js";
 
 const sup = new Supervisor();
-await sup.start();
+try {
+  await sup.start();
+} catch (err) {
+  // e.g. LOCK_HELD from a second supervisor instance: exit promptly, structured.
+  const e = err instanceof MickeError
+    ? err
+    : new MickeError("INTERNAL", err instanceof Error ? err.message : String(err), undefined);
+  console.error(`micke: fatal: ${JSON.stringify(e.toJSON())}`);
+  process.exit(1);
+}
+
+const dashboard = startDashboard(() => sup.listSessions());
+if (dashboard.port > 0) console.error(`micke: dashboard at http://127.0.0.1:${dashboard.port}/`);
 
 const server = new Server({ name: "micke", version: "0.1.0" }, { capabilities: { tools: {} } });
 registerTools(server, sup);
@@ -21,8 +34,13 @@ async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
   console.error(`micke: ${signal}, killing shell channels (containers stay; they become orphaned)`);
+  dashboard.stop();
   await sup.shutdown();
   process.exit(0);
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+// Die with the MCP client: without this, the dashboard's listener would keep
+// the process (and the instance lock) alive forever after stdin EOF.
+process.stdin.on("end", () => void shutdown("stdin closed"));
+process.stdin.on("close", () => void shutdown("stdin closed"));
