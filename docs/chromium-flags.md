@@ -1,403 +1,75 @@
-# Chromium under micke — flags, /dev/shm, and the driving loop
+# Chromium under micke
 
-How to launch and drive chromium inside a micke session. Everything below was
-verified end to end on this image (`micke:latest`, agent-desktop v1.0.2, real
-Xvfb): the receipts quoted are from actual runs.
+For humans maintaining or debugging the chromium setup. Agents do not need
+this file: the driving loop (snapshot → click on `@ref` → verify with
+`micke-state`) ships in the `session_shell` tool description at runtime.
 
-## The easy way: `micke-chromium`
+## Launch
 
-The image ships `/usr/local/bin/micke-chromium`, a wrapper that launches
-chromium with both required flags (below) already baked in:
+Prefer the wrapper — both required flags pre-baked:
 
 ```bash
-# verified receipt: ok=true, window.accessible=true (window.title settles after
-# load; step 2's wait is what confirms it)
-micke-chromium https://example.com
-
-# extra chromium flags ride along as --arg= passthrough, after the URL
-micke-chromium https://example.org --arg=--load-extension=/tmp/testext
+micke-chromium https://example.com   # extra chromium flags: --arg=--flag, after the URL
 ```
 
-Prefer the wrapper — nothing to remember, nothing to get wrong (verified
-in-session: `ok:true`, `window.accessible:true`, then `wait --window "Example
-Domain"` → `found:true`, snapshot `ref_count=83`). The raw flag form is
-documented below (and still works) as history/fallback. One thing to ignore:
-the launch receipt carries a `suggestion` to "run close-app and then launch
-`--cdp`" for web-content work. Skip it — driving and verifying through the
-AT-SPI a11y tree is the whole point of micke (the accessibility commands
-still cover everything, as the suggestion itself notes).
-
-## The two required flags
-
-What `micke-chromium` bakes in; the raw form, kept as fallback:
+Raw form (what the wrapper bakes in):
 
 ```
 agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility
 ```
 
-- **`--no-sandbox`** — chromium's sandbox cannot start inside the micke
-  sandbox (no user namespaces / SUID helpers). Without it chromium exits
-  immediately. The gvx sandbox is the security boundary; the browser sandbox
-  inside it is redundant.
-- **`--force-renderer-accessibility`** — forces chromium to expose its
-  accessibility tree even though there is no assistive-tech client. Without
-  it, `snapshot` sees an empty/near-empty tree and there are no `@ref`s to
-  click. This flag is what makes the whole snapshot → act-on-ref loop work.
+- `--no-sandbox` — chromium's sandbox cannot start under gVisor (no user
+  namespaces / SUID helpers); the gvx sandbox is the security boundary.
+- `--force-renderer-accessibility` — exposes the a11y tree even with no
+  assistive-tech client; without it snapshots carry no `@ref`s to click.
 
-`ACCESSIBILITY_ENABLED=1` is already baked into the image, and the session
-shell auto-sources `/tmp/session.env` (DISPLAY, the D-Bus session bus — AT-SPI
-is discovered through it), so `agent-desktop status` reports accessibility
-**granted** with no manual setup. Verified:
-`status.data.permissions.accessibility.state == "granted"`.
-
-## `--arg=` passthrough
-
-Every `--arg=VALUE` is passed through to chromium verbatim. Verified examples:
-
-```bash
-# custom URL (verified: window title "Example Domain - Chromium")
-agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility --arg=https://example.com
-
-# load an unpacked extension (verified: relaunch ok with a v3 manifest at /tmp/testext)
-agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility \
-    --arg=--load-extension=/tmp/testext --arg=https://example.org
-```
-
-Note: `launch` attaches to (or forwards arguments to) an already-running
-chromium by default, so a new `--arg` set may not be applied. If one is
-already running, close it first (`agent-desktop close-app chromium`), then
-launch again.
+`launch` attaches to an already-running chromium: to apply a new flag set,
+`agent-desktop close-app chromium` first, then launch again.
 
 ## Real Xvfb, not headless
 
-micke runs a **real X server** (Xvfb, 1280x800x24 by default; override at
-`session_create` with `screen`) plus openbox, and mirrors it over VNC. There
-is no `--headless` anywhere, on purpose:
-
-- headless chromium hides extensions, WebGL, font rendering and native
-  dialogs — the things micke exists to test;
-- AT-SPI accessibility works against the real widget tree; snapshots of a
-  headless browser are not the same tree.
-
-If a test wants a different screen size, set it at create time — don't reach
-for chromium flags.
+The desktop is a real X server (Xvfb + openbox, mirrored over VNC). There is
+no `--headless` anywhere: it hides extensions, WebGL, font rendering and
+native dialogs, and its a11y tree is not the real widget tree. Screen size is
+set at `session_create` (`screen`), not with chromium flags.
 
 ## /dev/shm
 
-Chromium uses `/dev/shm` for shared memory; too small a tmpfs makes tabs
-crash with "Aw, Snap" once a page is heavy. Under gvx, `/dev/shm` is sized to
-half of host RAM by default — comfortably above the old 1 GB Docker flag — and
-`rungv` refuses explicit tmpfs mounts at/below `/dev`, so micke adds no flag.
-You don't need to do anything for `session_create`.
-
-The per-sandbox memory guard is `rungv -m` (default `2g`, override with
-`MICKE_SESSION_MEMORY`); it is a polling guard, not a cgroup limit. If you
-drive the image manually, keep the guard:
-
-```sh
-rungv run -cache-dir ~/.cache/micke/gvx -pull=never -m 2g -p 7801 -p 6080 ghcr.io/gosuda/micke:latest
-```
-
-## The driving loop (cheatsheet)
-
-One full verified loop over `https://example.com` — launch → wait for a window
-→ snapshot → click a `@ref` → re-snapshot. Each step is an INDEPENDENT
-`session_shell` call (every call is a fresh bash: no cwd or exported env
-carries over), with the desktop env already sourced in each one. The recipe is
-otherwise unchanged — the tools do not depend on shell state.
-
-```bash
-# 1. launch (verified receipt: ok=true, window.accessible=true; title settles
-#    after load)
-micke-chromium https://example.com
-#   raw equivalent: agent-desktop launch chromium --arg=--no-sandbox \
-#     --arg=--force-renderer-accessibility --arg=https://example.com
-
-# 2. wait for the window (verified: data.found=true, elapsed_ms=11)
-agent-desktop wait --window "Example Domain" --app chromium --timeout 20000
-
-# 3. snapshot, interactive elements only, compact (verified: data.ref_count=83, snapshot_id=s26re9dx64r3s5)
-agent-desktop snapshot --app chromium -i --compact
-
-#    ...find the element you want in data.tree, e.g. role=link name="Learn more"
-#    at ref_id @s26re9dx64r3s5:e65 ...
-
-# 4. act on the ref — the ref embeds the snapshot id (verified: ok=true)
-agent-desktop click "@s26re9dx64r3s5:e65"
-
-# 5. verify from receipts, not pixels (verified after the click: new
-#    snapshot_id, ref_count 177; wait --window "Example Domains" -> found=true)
-micke-state   # {"alive":true,"title":"Example Domains","url":"iana.org","refs":177}
-agent-desktop wait --window "Example Domains" --app chromium --timeout 15000
-agent-desktop snapshot --app chromium -i --compact
-```
-
-There is deliberately no screenshot step: see "Screenshots: only when a human
-consumes them" below.
-
-Habits that keep the loop honest:
-
-- **Assert on receipts, not pixels**: `ok`, `ref_count`, `window.title`,
-  `found` from the JSON above — screenshots are evidence, not assertions.
-  `micke-state` packages the three cheap ones (`alive`, `title`, `url`,
-  `refs`) into ONE line of JSON, about two seconds, writing no files; use it
-  for "is the browser alive" and "did the click land".
-- **Refs are snapshot-scoped**: the `@<snapshot>:<ref>` form only resolves
-  against the snapshot it came from; after any action, re-snapshot before the
-  next `click`/`type`.
-- **Wait, don't sleep**: `wait --window` (and `wait` on refs) is the
-  deterministic gate between steps.
-- **Refs may be `offscreen` and still work**: snapshot entries can carry
-  `states:["offscreen"]` (element outside the current viewport). Verified:
-  example.com's "Learn more" link AND its statictext child both carried
-  `"states":["offscreen"]`, and click-by-ref still navigated. Don't skip a
-  ref over it.
-- A human can watch the same desktop, or take over while the agent is paused,
-  via the session's noVNC URL — see
-  [manual-intervention.md](manual-intervention.md).
-- **Check liveness before asserting**: `micke-state` exits 1 when the browser
-  is gone; `list-apps`, `list-windows` and `screenshot` will happily keep
-  answering `ok` on a dead desktop.
-
-## Screenshots: only when a human consumes them
-
-Ask first: **who reads this PNG?** If the answer is "me, to check the click
-worked", don't take it. `screenshot` succeeds even when the click did nothing,
-nothing in the agent loop consumes the file, and a 100 KB image says less than
-one line of state. Take a screenshot only when a human needs to see the
-pixels: they asked for one, you are reporting a visual defect (layout, color,
-a font rendering as tofu), or the answer exists only in the image.
-
-Verify actions without pixels instead:
-
-| question | assertion |
-| :-- | :-- |
-| is chromium alive? | `micke-state` → `alive:true` (exit 0) |
-| did the click navigate? | `micke-state` → changed `title`/`url`; `wait --window` → `found:true` |
-| did the page change? | `micke-state` → `refs` moved, or a fresh `snapshot` has a new `snapshot_id`/`ref_count` |
-| is the element there? | `snapshot` / `find` → the `@ref` exists |
-
-```bash
-micke-state   # {"alive":true,"title":"Npay 증권","url":"stock.naver.com","refs":547}
-```
-
-When a human does need the file, write it to `/workspace` so it lands on the
-host (see "Workspaces are always mounted"):
-
-```bash
-agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
-```
-
-Screenshots are evidence, not assertions — keep any assertion in the receipt,
-not in the image.
-
-## A dead browser is silent — and `agent-desktop press` kills it
-
-A browser death is invisible to almost every surface. Measured on this image
-(2026-11-03, agent-desktop v1.0.2):
-
-| surface | after the browser is gone |
-| :-- | :-- |
-| `list-apps`, bare `list-windows` | `ok:true` with an empty `[]` (`--app chromium` is the one form that errors, `APP_NOT_FOUND`) |
-| `agent-desktop status` | `ok:true` — the desktop is up, the browser is not |
-| `screenshot` | `ok:true`, a valid 1280x800 PNG of the empty desktop |
-| `session_list` | still `status:"ready"` (sandbox liveness, not browser liveness) |
-| `micke-state` | exit 1, `{"alive":false,...}` — the one honest signal |
-
-Cheapest correct probes: `pgrep -x chromium` (8–23 ms measured), `xdotool
-search --name Chromium` (23–38 ms), or `micke-state` (2.0–2.3 s alive, ~22 ms
-dead — and it also answers "did it land").
-
-**`press` is the crash.** `agent-desktop press` SIGSEGVs chromium here. Under
-`--force-renderer-accessibility`, 25 of 29 delivered presses killed the
-process (`rc 139`) — `ctrl+r`, `F5`, `ctrl+w`, `ctrl+shift+q`, and even a bare
-`a`. The receipt still said `ok:true`, `delivered_unverified`. `xdotool key
---clearmodifiers <combo>` is the safe path: 0 crashes in 20+ attempts,
-including 3 `ctrl+r` reloads of naver.com. The X events are byte-identical
-(`xev`: `synthetic NO`, same keycode/state); the difference is that `press`
-goes through the AT-SPI `DeviceEventController.NotifyListenersSync` path, two
-calls ~40 ms before the browser's D-Bus name disappears. Dropping the a11y
-flag would "fix" it and destroy the refs, so use `micke-key <combo>`: it
-resolves and activates the chromium window, then sends the combo with
-xdotool. xdotool has no receipt — that is delivery, not effect; verify with
-`micke-state`. `agent-desktop click` is unaffected.
-
-**Why it died.** A dead chromium leaves no artifact: `launch` detaches it with
-stdin/stdout/stderr all on `/dev/null` and it is re-parented to PID 1;
-crashpad cannot dump under gVisor (`ptrace: EINVAL`), and there is no core
-pattern. `micke-chromium` therefore adds `--enable-logging
---arg=--log-file=/tmp/chromium.log`; that file survives the detach and is the
-only post-mortem. There is deliberately no restart/supervision: a crash must
-stay visible.
-
-## Dispositions: delivery ≠ outcome
-
-`click` and `type` receipts carry a `disposition` object describing what
-agent-desktop could observe about the **delivery of the input** — never the
-app-level effect. Its `delivery` value is one of:
-
-- **`delivered_verified`** — the adapter observed the postcondition it names.
-  That readback still proves only the element, not that the application
-  committed the change.
-- **`delivered_unverified`** — the input was dispatched, but no postcondition
-  could confirm it. Common, and usually fine.
-- **`delivery_uncertain`** — delivery could not be determined (for example,
-  the app stopped responding); treat it as possibly landed.
-- **`not_delivered`** — the input did not land (dead ref, element gone, wrong
-  window). The action failed; re-snapshot and rethink.
-- **`unknown`** — the command established nothing about delivery.
-
-Verified receipt from a real click of example.com's "Learn more":
-
-```json
-"disposition": { "delivery": "delivered_unverified", "retry": "unsafe" }
-```
-
-…with `ok:true` and `steps[0].outcome:"succeeded"` — and the click did
-navigate (title "Example Domain - Chromium" → "Example Domains - Chromium",
-address bar → iana.org, re-snapshot ref_count 83 → 177).
-
-The right posture for **every** disposition: treat the action as unproven
-until the world changed. Gate on `wait --window` for the expected navigation,
-confirm with a re-snapshot; the disposition alone is never the assertion.
-
-## Filter big snapshots inside the sandbox
-
-`session_shell` caps each output stream at 256 KiB by default
-(`max_output_bytes`), and a compact snapshot is ONE line of JSON —
-example.com already serializes to ~14 KB (measured: 14,091 bytes, ref_count
-83), and real pages blow past the cap fast. Filter IN the command, so only
-the small result crosses the shell boundary (verified in-session):
-
-```bash
-# refs + names of every link, one per line
-agent-desktop snapshot --app chromium -i --compact \
-    | jq -r '.. | objects | select(.role? == "link") | [.ref_id, .name] | @tsv'
-# -> @s8rjgz0qjndhv:e65<TAB>Learn more
-
-# quick-and-dirty: grep the compact JSON (469 bytes out for 20 names)
-agent-desktop snapshot --app chromium -i --compact | grep -o '"name":"[^"]*"'
-```
-
-If you genuinely need the whole tree, raise `max_output_bytes` for that one
-call — but a filter is usually what you actually wanted.
-
-## Finding a click target on a heavy page
-
-`agent-desktop find` is the obvious tool and the wrong one on heavy pages. On
-www.naver.com and stock.naver.com it never found `--role link --name '증권'`:
-0/7 runs at 5/10/20/30 s. Without `--first` the locator wants two consecutive
-stable passes of a ~1150-node tree the page keeps mutating; it spends ~80% of
-the budget and returns TIMEOUT while its receipt admits
-`observed_matches: 1..3`. `--count`/`--limit 1` behave the same. `--first`
-succeeds, but latency tracks the budget, not the element (~0.8 × budget):
-
-| budget | 3000 ms | 10000 ms | 20000 ms | 30000 ms |
-| :-- | --: | --: | --: | --: |
-| `find --first` | 2.1 s | 8.0–8.8 s (4/5; one transient TIMEOUT) | 16 s | 25 s |
-
-Raising the budget is the wrong knob. Snapshot is: the default 3000 ms
-deadline truncated at 2.9 s/462 refs (`truncated:true`) and missed `증권` in 1
-of 3 research runs; the research run at 5000 ms walked the whole 521-node tree
-in 4.3–4.6 s (4/4), while a live www.naver.com re-check at 5000 ms was still
-truncated (511 refs, 4.53 s) but did contain `증권`; 10000 ms completed it (515
-refs, 6.6 s). Filter IN the guest so only matches cross the shell boundary
-(research: 4.71 KB for 134 links; our `증권` filter: 4.58 s, 72 bytes, 2
-matches):
-
-```bash
-agent-desktop snapshot --app chromium -i --compact --timeout-ms 5000 \
-  | jq -r '.. | objects | select(.ref_id? and ((.name? // "") | ascii_downcase | contains("증권"))) | [.ref_id, .role, .name] | @tsv'
-# -> @s...:e123<TAB>link<TAB>증권
-```
-
-`micke-find 증권 --role link` wraps that loop (`--json` for an array):
-
-```bash
-agent-desktop click "$(micke-find 증권 --role link | head -n 1 | cut -f1)"
-```
-
-Escape hatches, in order: on `truncated:true` retry once at
-`--timeout-ms 10000`, then 20000 (`micke-find` does this); never retry a
-complete tree. `--root @<snap>:<ref>` is fast (0.76 s find, 0.88 s snapshot)
-but needs a ref you already have. `find --first` works at the table's prices.
-`micke-page-text --links` gives `{text,href}` in ~7.2 s but no `@ref`, so it
-can reach a destination, never click one. Negatives: `--skeleton` returned 91
-refs, all browser chrome, 0 page links (skeleton then `--root webarea`: 6.35 s
-/ 110 KB, still a full dump); `--max-depth` truncation is non-monotonic (depth
-6 → 140 refs/2 links; depth 8 → 54 refs/0 links). And 31% of refs are
-`offscreen` and click fine — do not filter them out.
-
-## Content vs. interaction: `micke-page-text`
-
-The AT-SPI tree is the **interaction** path (snapshot → act on `@ref`). It is
-not a content extractor: on a real news page, `agent-desktop find --role link`
-returns `TIMEOUT / locator_incomplete` because the traversal budget runs out
-before the tree does. If you only need to *read* a page, do not snapshot it.
-
-```bash
-# one small JSON object: {url,title,text,chars,truncated}
-micke-page-text https://example.com | jq -r .text
-
-# headlines/links: [{text,href}, ...]
-micke-page-text https://news.google.com --links | jq -r '.links[].text'
-
-# cap the payload for a chatty page
-micke-page-text https://example.com --max-chars 5000 --pretty
-```
-
-How it works: headless chromium renders the URL in a throwaway
-`--user-data-dir` (so it never attaches to the GUI chromium on `:99`), and
-`image/page_text.py` (stdlib python3) extracts title, block-ordered text, and
-links. The multi-megabyte DOM never crosses the `session_shell` output cap —
-only the extracted JSON does.
-
-Use both paths together: `micke-page-text` to find *what* is on the page,
-a11y `snapshot`/`click` to *act* on it.
-
-## Exit codes: `ok:false` is a failure
-
-`agent-desktop` reports application-level failures inside a successful process:
-
-```json
-{"version":"2.5","ok":false,"error":{"code":"TIMEOUT", ...}}   # used to be rc 0
-```
-
-The image ships `/usr/local/bin/agent-desktop`, a shim over the npm-installed
-CLI (`/opt/agent-desktop/bin/agent-desktop`) that exits 1 whenever the JSON
-envelope says `ok:false`. Stdout is byte-identical, so `| jq` pipelines are
-unaffected; process-level non-zero codes and non-JSON output pass through
-untouched. Consequence: `set -e`, `&&`, and `if agent-desktop ...` are now
-trustworthy — but read the envelope for the error code, since exit 1 alone
-does not say *which* failure.
-
-## Workspaces are always mounted
-
-`session_create` without `workspace` still gets a host directory: micke creates
-one under `<MICKE_STATE_DIR>/workspaces/<session_id>`, `chmod 0777`s it (the
-documented exception — see below), and reports it as `workspace` in the
-receipt. Everything written to `/workspace` in the guest lands there on the
-host, so screenshots and dumps need no base64 round-trip:
-
-```bash
-agent-desktop screenshot /workspace/evidence.png   # host: <workspace>/evidence.png
-```
-
-**Explicit workspaces are checked, not rewritten.** gvx/rungv bind-mounts the
-host directory with no uid mapping: the guest writes as uid 1000 while the
-directory is owned by the host user. A default `0755` directory is readable
-but **not writable** in the guest, so micke rejects it up front:
-
-```
-{"code":"WORKSPACE_NOT_WRITABLE",
- "message":"workspace \"…\" is not writable by the guest (uid 1000, gid 1000); …",
- "hint":"Run `chmod -R a+w …` (or pass a directory the guest can write). …"}
-```
-
-Fix it with exactly that `chmod -R a+w <path>` (or pass a directory the guest
-can write). micke never widens permissions on a directory it did not create.
-`MICKE_GUEST_UID`/`MICKE_GUEST_GID` (default `1000:1000`) change the identity
-used for the check if you run a custom image.
-
-Workspace files are kept after `session_close` (they are the evidence trail);
-delete the directory when you no longer need it.
+gvx sizes `/dev/shm` to half of host RAM and refuses explicit tmpfs mounts at
+`/dev`, so micke adds no flag. The per-sandbox guard is `rungv -m`
+(`MICKE_SESSION_MEMORY`, default `2g`).
+
+## Measured gotchas (2026-11, agent-desktop v1.0.2)
+
+- `agent-desktop press` SIGSEGVs chromium here (25/29 combos, rc 139, receipt
+  still `ok:true` / `delivered_unverified`). Use `micke-key <combo>` (xdotool)
+  — it proves delivery, not effect; verify with `micke-state`. `click`/`type`
+  are unaffected.
+- A dead browser is silent: `list-apps`, `list-windows`, `screenshot` and
+  `session_list` all keep answering `ok` on a dead desktop. `micke-state`
+  (exit 1) is the honest probe.
+- `agent-desktop find` on heavy pages (naver.com) spends ~80% of its budget
+  waiting for tree stability and returns `TIMEOUT` while admitting
+  `observed_matches: 1..3`; `--first` succeeds but latency tracks the budget.
+  Use ONE filtered snapshot instead (`micke-find`).
+- A snapshot receipt saying `truncated:true` → retry once at
+  `--timeout-ms 10000`, then 20000 (`micke-find` does this); never retry a
+  complete tree.
+- Refs are snapshot-scoped (`@<snapshot>:<ref>` resolves only against the
+  snapshot it came from): re-snapshot after any action. `offscreen` refs
+  (~31% on naver.com) still click fine — do not filter them out.
+- A compact snapshot is one huge JSON line: filter inside the guest
+  (`| jq -r '.. | objects | select(.role?=="link") | [.ref_id,.name] | @tsv'`)
+  so only the small result crosses the 256 KiB `session_shell` output cap.
+- Action receipts' `disposition` describes input **delivery**, never the
+  app-level effect — treat every action as unproven until `wait --window`,
+  `micke-state` or a re-snapshot shows the world changed.
+- The image shims `agent-desktop` to exit 1 whenever the JSON envelope says
+  `ok:false`, so `set -e` / `&&` are trustworthy; read the envelope for the
+  error code.
+- `micke-chromium` adds `--enable-logging --log-file=/tmp/chromium.log`; that
+  file survives the crash-detach and is the only post-mortem (crashpad cannot
+  dump under gVisor, and a crash stays visible on purpose — no supervision).
+- For page **content** use `micke-page-text <url> [--links] [--max-chars N]`
+  (headless, throwaway profile): the a11y tree is the interaction path, not a
+  reader.
