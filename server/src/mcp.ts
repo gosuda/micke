@@ -12,15 +12,14 @@ import {
 import { MickeError, type Supervisor } from "./supervisor.js";
 
 const CREATE_DESC = [
-  "Boot a disposable Linux desktop session (Docker container: Xvfb + openbox + chromium + agent-desktop + noVNC).",
-  "Returns session_id and novnc_url — a human can open novnc_url in a local browser to watch or manually drive the live desktop.",
-  "After creating, run ALL commands through session_shell on that session_id (shell env already sources /tmp/session.env, so `agent-desktop` works directly).",
+  "Boot a disposable Linux desktop (Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
+  "Open chromium with `micke-chromium <url>` (required flags pre-baked); open novnc_url in a browser to watch or take over the desktop.",
+  "Then run ALL commands through session_shell on that session_id — env is pre-sourced, `agent-desktop` works directly.",
 ].join(" ");
 
 const SHELL_DESC = [
-  "Run a bash command in the session's ONE persistent shell: working directory and exported env vars persist across calls.",
-  "This is the only way to drive the desktop — e.g. `agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility --arg=https://example.com`, then `agent-desktop snapshot --app chromium -i --compact`, `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`.",
-  "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}. Commands have no stdin (redirect from /dev/null).",
+  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, `agent-desktop snapshot --app chromium -i --compact` (filter with grep/jq IN the command — trees are large), `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`, `agent-desktop screenshot /workspace/x.png`.",
+  "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
 ].join(" ");
 
 const TOOLS = [

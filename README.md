@@ -41,7 +41,7 @@ docker exec micke bash -c '. /tmp/session.env && agent-desktop list-apps'
 
 # launch and drive a browser
 docker exec micke bash -c '. /tmp/session.env && \
-    agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility https://example.com && \
+    micke-chromium https://example.com && \
     agent-desktop snapshot --app chromium -i'
 ```
 
@@ -112,6 +112,28 @@ protocol, and the integration tests (`bun test tests/`).
   /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
 - Pausing so a human can log in over noVNC (credentials never enter the
   transcript): [docs/manual-intervention.md](docs/manual-intervention.md)
+
+## Connecting an MCP client
+
+Any MCP client that speaks stdio can use micke. For example, in OpenCode's
+config (`opencode.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "micke": {
+        "type": "local",
+        "command": ["bun", "run", "src/main.ts"],
+        "cwd": "<repo>/server"
+      }
+    }
+  }
+}
+```
+
+(`bun` must be on the client's PATH — or give its absolute path — and the
+`cwd` must point at this repo's `server/` directory.)
 
 ## License
 

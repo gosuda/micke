@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xdotool \
         xclip \
         jq \
+        file \
         # --- agent-desktop CLI (npm >= 18; the package bundles the native
         #     binary and the agent-desktop-linux-clipboard-owner helper) ----
         nodejs \
@@ -59,6 +60,10 @@ RUN groupadd -g "$GID" "$USERNAME" \
 
 COPY entrypoint.sh /usr/local/bin/micke-entrypoint
 RUN chmod 0755 /usr/local/bin/micke-entrypoint
+
+# Preferred chromium launch path: flags pre-baked (see micke-chromium.sh).
+COPY micke-chromium.sh /usr/local/bin/micke-chromium
+RUN chmod 0755 /usr/local/bin/micke-chromium
 
 USER $USERNAME
 WORKDIR /home/$USERNAME

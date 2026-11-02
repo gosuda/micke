@@ -101,8 +101,7 @@ test(
     // --- 4. shell: launch chromium, wait, snapshot ---------------------------
     const launch = JSON.parse((await call("session_shell", {
       session_id: a.session_id,
-      command:
-        "agent-desktop launch chromium --arg=--no-sandbox --arg=--force-renderer-accessibility --arg=https://example.com",
+      command: "micke-chromium https://example.com",
       timeout_ms: 60_000,
     })).stdout);
     expect(launch.ok).toBe(true);
