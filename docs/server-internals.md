@@ -131,6 +131,23 @@ unexpected (non-Micke) exceptions; fatal startup failures exit the process
 with `LOCK_HELD` (second supervisor on the same state dir) or `PORT_HELD`
 (daemon port already bound) on stderr.
 
+### Audit log
+
+Every MCP tool call appends exactly one line to
+`<MICKE_STATE_DIR>/audit.log` (`src/audit.ts`; the append is best-effort and
+can never fail the call it observes):
+
+```
+2026-11-02T16:58:00.123Z session_shell sid=1a2b3c4d rc=0 timed_out=false cmd=micke-state took=842ms ok
+2026-11-02T16:58:03.400Z session_shell sid=1a2b3c4d cmd=sleep 5 took=3ms err=SESSION_NOT_FOUND
+```
+
+`<ISO> <tool> [k=v …] took=<ms>ms ok|err=<CODE>` — commands are
+whitespace-collapsed and capped at 400 chars, and output bodies are never
+logged. This is the maintainer's objective record of what an agent actually
+ran (shell-call counts, sleeps, screenshots, status checks) after a session
+and its transcript are gone; `rm` the file to reset it.
+
 ## Sandbox lifecycle
 
 `session_create` spawns:

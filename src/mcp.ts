@@ -10,6 +10,8 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { MickeError, type Supervisor } from "./supervisor.js";
+import { auditToolCall, flatCmd } from "./audit.js";
+import { defaultStateDir } from "./gvxio.js";
 
 const CREATE_DESC = [
   "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
@@ -84,6 +86,12 @@ function int(v: unknown, name: string): number | undefined {
   return v;
 }
 
+/** Audit detail on the failure path, where argument types are untrusted. */
+function errDetail(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const sid = typeof args.session_id === "string" ? args.session_id : undefined;
+  return tool === "session_shell" ? { sid, cmd: flatCmd(args.command) } : { sid };
+}
+
 function ok(result: unknown): CallToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -115,35 +123,47 @@ export function createMcpServer(sup: Supervisor): Server {
 }
 
 export function registerTools(server: Server, sup: Supervisor): void {
+  const stateDir = defaultStateDir();
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const t0 = Date.now();
     try {
       switch (name) {
-        case "session_create":
-          return ok(
-            await sup.createSession({
-              image: args.image !== undefined ? str(args.image, "image") : undefined,
-              workspace: args.workspace !== undefined ? str(args.workspace, "workspace") : undefined,
-              screen: args.screen !== undefined ? str(args.screen, "screen") : undefined,
-            }),
-          );
-        case "session_list":
-          return ok({ sessions: await sup.listSessions() });
-        case "session_close":
-          return ok(await sup.closeSession(str(args.session_id, "session_id")));
+        case "session_create": {
+          const r = await sup.createSession({
+            image: args.image !== undefined ? str(args.image, "image") : undefined,
+            workspace: args.workspace !== undefined ? str(args.workspace, "workspace") : undefined,
+            screen: args.screen !== undefined ? str(args.screen, "screen") : undefined,
+          });
+          auditToolCall(stateDir, name, { sid: r.session_id }, t0, "ok");
+          return ok(r);
+        }
+        case "session_list": {
+          const rows = await sup.listSessions();
+          auditToolCall(stateDir, name, { rows: rows.length }, t0, "ok");
+          return ok({ sessions: rows });
+        }
+        case "session_close": {
+          const r = await sup.closeSession(str(args.session_id, "session_id"));
+          auditToolCall(stateDir, name, { sid: r.closed }, t0, "ok");
+          return ok(r);
+        }
         case "session_shell": {
+          const sid = str(args.session_id, "session_id");
+          const command = str(args.command, "command");
           const r = await sup.runShell(
-            str(args.session_id, "session_id"),
-            str(args.command, "command"),
+            sid,
+            command,
             int(args.timeout_ms, "timeout_ms"),
             int(args.max_output_bytes, "max_output_bytes"),
             args.cwd !== undefined ? str(args.cwd, "cwd") : undefined,
           );
+          auditToolCall(stateDir, name, { sid, rc: r.rc, timed_out: r.timedOut, cmd: flatCmd(command) }, t0, "ok");
           return ok({
-            session_id: args.session_id,
+            session_id: sid,
             stdout: r.stdout,
             stderr: r.stderr,
             rc: r.rc,
@@ -152,10 +172,15 @@ export function registerTools(server: Server, sup: Supervisor): void {
             duration_ms: r.durationMs,
           });
         }
-        default:
-          return fail(new MickeError("UNKNOWN_TOOL", `no tool "${name}"`, "The surface is exactly: session_create, session_list, session_close, session_shell."));
+        default: {
+          const err = new MickeError("UNKNOWN_TOOL", `no tool "${name}"`, "The surface is exactly: session_create, session_list, session_close, session_shell.");
+          auditToolCall(stateDir, name, errDetail(name, args), t0, "err=UNKNOWN_TOOL");
+          return fail(err);
+        }
       }
     } catch (err) {
+      const code = err instanceof MickeError ? err.code : "INTERNAL";
+      auditToolCall(stateDir, name, errDetail(name, args), t0, `err=${code}`);
       return fail(err);
     }
   });

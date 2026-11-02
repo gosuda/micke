@@ -38,6 +38,12 @@ export function gvxCacheDir(): string {
     ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "micke", "gvx");
 }
 
+/** Pidfiles, logs, workspaces and the audit log live under this one dir. */
+export function defaultStateDir(): string {
+  return process.env.MICKE_STATE_DIR
+    ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "micke");
+}
+
 export async function rungv(args: string[], timeoutMs?: number): Promise<GvxResult> {
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {

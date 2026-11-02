@@ -10,7 +10,6 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, openSync, readSync, statSync, writeSync, closeSync, ftruncateSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { homedir } from "node:os";
 import { dlopen } from "bun:ffi";
 import * as io from "./gvxio.js";
 import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, type ShellResult } from "./shell.js";
@@ -71,8 +70,7 @@ export class Supervisor {
   private lockFd: number | null = null;
 
   constructor() {
-    this.stateDir = process.env.MICKE_STATE_DIR
-      ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "micke");
+    this.stateDir = io.defaultStateDir();
     mkdirSync(this.stateDir, { recursive: true });
     mkdirSync(io.sessionsDir(this.stateDir), { recursive: true });
   }
