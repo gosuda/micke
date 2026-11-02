@@ -121,6 +121,13 @@ dumps, the occasional screenshot) written there are already on the host — no
 base64 through the shell socket. Files are kept after `session_close`; delete
 the directory when you are done with it.
 
+Every MCP tool call appends one line to `<MICKE_STATE_DIR>/audit.log`
+(`<ISO> <tool> [k=v …] took=<ms>ms ok|err=<CODE>`; commands are
+whitespace-collapsed and capped at 400 chars, output bodies are never logged,
+and a failing append can never fail the call). It is the objective record of
+what an agent ran — kept after the session and its transcript are gone; `rm`
+the file to reset it.
+
 Five additions make the shell agent-friendly:
 
 - `agent-desktop` exits **non-zero** when its JSON envelope says `ok:false`
@@ -143,9 +150,7 @@ Five additions make the shell agent-friendly:
   `ref<TAB>role<TAB>name`, ready for `click`. Prefer it to
   `agent-desktop find`, which needs `--first` and then just spends its budget.
 
-See [docs/server-internals.md](docs/server-internals.md) for configuration,
-the shell-channel protocol, and adoption semantics. Tests are described under
-[Testing](#testing).
+Tests are described under [Testing](#testing).
 
 - Driving chromium in a session — required flags, `--arg=` passthrough,
   /dev/shm, and the snapshot → click → verify loop: [docs/chromium-flags.md](docs/chromium-flags.md)
