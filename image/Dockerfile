@@ -114,6 +114,13 @@ RUN chmod 0755 /usr/local/bin/micke-type
 COPY image/micke-find /usr/local/bin/micke-find
 RUN chmod 0755 /usr/local/bin/micke-find
 
+# In-guest manual page: the desktop loop recipe + one line per helper.
+# agent-desktop's skills are compiled into its binary (location "embedded"),
+# so they cannot advertise the micke helpers — this is the in-guest entry
+# point the session_shell description points at.
+COPY image/micke-help /usr/local/bin/micke-help
+RUN chmod 0755 /usr/local/bin/micke-help
+
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
