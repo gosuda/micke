@@ -120,16 +120,21 @@ dumps, the occasional screenshot) written there are already on the host — no
 base64 through the shell channel. Files are kept after `session_close`; delete
 the directory when you are done with it.
 
-Three additions make the shell agent-friendly:
+Four additions make the shell agent-friendly:
 
 - `agent-desktop` exits **non-zero** when its JSON envelope says `ok:false`
   (shimmed in the image), so `set -e` and `&&` are trustworthy.
 - `micke-page-text <url>` reads a page as small JSON (`{title,text,links}`)
   via headless chromium. Use it for content; use the AT-SPI tree for
-  interaction — heavy pages time out the tree.
+  interaction — snapshots of heavy pages truncate (`truncated:true`) and
+  `find` times out.
 - `micke-state` answers "is chromium alive / did the click land?" as ONE line
   of JSON (`{alive,title,url,refs}`) from the a11y tree, in about two seconds
   and without writing a file — verify with that instead of a screenshot.
+- `micke-find <substring> [--role <role>]` finds a clickable `@ref` on a
+  heavy page with one filtered snapshot (occasionally two or three) and prints
+  `ref<TAB>role<TAB>name`, ready for `click`. Prefer it to
+  `agent-desktop find`, which needs `--first` and then just spends its budget.
 
 See [docs/server-internals.md](docs/server-internals.md) for configuration,
 the shell-channel protocol, adoption semantics, and the integration tests

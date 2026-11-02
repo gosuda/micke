@@ -96,6 +96,12 @@ RUN chmod 0755 /usr/local/bin/micke-page-text && chmod 0644 /usr/local/lib/micke
 COPY image/micke-state.sh /usr/local/bin/micke-state
 RUN chmod 0755 /usr/local/bin/micke-state
 
+# Find a click target by name WITHOUT `agent-desktop find`, which needs two
+# stable passes of a mutating tree and spends its whole budget. One compact
+# snapshot plus a guest-side jq filter; retries only on truncated:true.
+COPY image/micke-find /usr/local/bin/micke-find
+RUN chmod 0755 /usr/local/bin/micke-find
+
 USER $USERNAME
 WORKDIR /home/$USERNAME
 

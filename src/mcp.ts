@@ -19,10 +19,10 @@ const CREATE_DESC = [
 ].join(" ");
 
 const SHELL_DESC = [
-  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, `agent-desktop snapshot --app chromium -i --compact` (filter with grep/jq IN the command — trees are large), `agent-desktop click \"@<snapshot>:REF\"`, `agent-desktop wait --window TITLE --app chromium`.",
+  "Run bash in the session's ONE persistent shell (cwd + exported env persist). Drive the desktop: `micke-chromium <url>`, then locate a target with ONE filtered snapshot: `agent-desktop snapshot --app chromium -i --compact | jq -r '.. | objects | select(.role?==\"link\") | [.ref_id,.name] | @tsv'` (filter IN the command — full trees are large), then `agent-desktop click \"@<snapshot>:REF\"` and `agent-desktop wait --window TITLE --app chromium`. `micke-find <substring> [--role R]` is the shortcut for that one-liner. Prefer the snapshot recipe to `agent-desktop find`: find needs `--first` and then still spends its whole budget. If a snapshot receipt says `truncated:true`, retry once at a higher `--timeout-ms`.",
   "Verify cheaply with `micke-state`: one line of JSON {\"alive\",\"title\",\"url\",\"refs\"} from the a11y tree, no files, ~2 s. It answers \"is the browser alive\" and \"did the click/navigation land\" — gate on a changed window title or URL, or a moved ref count; exit 1 means no chromium window.",
   "Take a screenshot ONLY when a human must see it: they asked for one, the answer exists only in pixels, or you are reporting a visual defect. Never screenshot to verify a click — nothing consumes the PNG; verify with window title / URL / ref_count instead. Write any screenshot to /workspace so it lands on the host.",
-  "For page CONTENT (reading, headlines, article text) use `micke-page-text <url> [--links]` — headless dump-dom -> small JSON. Heavy pages time out the a11y tree; don't snapshot what you only need to read.",
+  "For page CONTENT (reading, headlines, article text) use `micke-page-text <url> [--links]` — headless dump-dom -> small JSON. Heavy pages truncate the a11y tree; don't snapshot what you only need to read.",
   "`agent-desktop` exits non-zero when its JSON envelope reports ok:false, so `set -e` and `&&` are trustworthy; read the envelope for the error code.",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
   "A dropped channel is recoverable: the next call reconnects with a fresh shell (cwd/env reset).",

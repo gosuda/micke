@@ -238,6 +238,52 @@ agent-desktop snapshot --app chromium -i --compact | grep -o '"name":"[^"]*"'
 If you genuinely need the whole tree, raise `max_output_bytes` for that one
 call — but a filter is usually what you actually wanted.
 
+## Finding a click target on a heavy page
+
+`agent-desktop find` is the obvious tool and the wrong one on heavy pages. On
+www.naver.com and stock.naver.com it never found `--role link --name '증권'`:
+0/7 runs at 5/10/20/30 s. Without `--first` the locator wants two consecutive
+stable passes of a ~1150-node tree the page keeps mutating; it spends ~80% of
+the budget and returns TIMEOUT while its receipt admits
+`observed_matches: 1..3`. `--count`/`--limit 1` behave the same. `--first`
+succeeds, but latency tracks the budget, not the element (~0.8 × budget):
+
+| budget | 3000 ms | 10000 ms | 20000 ms | 30000 ms |
+| :-- | --: | --: | --: | --: |
+| `find --first` | 2.1 s | 8.0–8.8 s (4/5; one transient TIMEOUT) | 16 s | 25 s |
+
+Raising the budget is the wrong knob. Snapshot is: the default 3000 ms
+deadline truncated at 2.9 s/462 refs (`truncated:true`) and missed `증권` in 1
+of 3 research runs; the research run at 5000 ms walked the whole 521-node tree
+in 4.3–4.6 s (4/4), while a live www.naver.com re-check at 5000 ms was still
+truncated (511 refs, 4.53 s) but did contain `증권`; 10000 ms completed it (515
+refs, 6.6 s). Filter IN the guest so only matches cross the shell boundary
+(research: 4.71 KB for 134 links; our `증권` filter: 4.58 s, 72 bytes, 2
+matches):
+
+```bash
+agent-desktop snapshot --app chromium -i --compact --timeout-ms 5000 \
+  | jq -r '.. | objects | select(.ref_id? and ((.name? // "") | ascii_downcase | contains("증권"))) | [.ref_id, .role, .name] | @tsv'
+# -> @s...:e123<TAB>link<TAB>증권
+```
+
+`micke-find 증권 --role link` wraps that loop (`--json` for an array):
+
+```bash
+agent-desktop click "$(micke-find 증권 --role link | head -n 1 | cut -f1)"
+```
+
+Escape hatches, in order: on `truncated:true` retry once at
+`--timeout-ms 10000`, then 20000 (`micke-find` does this); never retry a
+complete tree. `--root @<snap>:<ref>` is fast (0.76 s find, 0.88 s snapshot)
+but needs a ref you already have. `find --first` works at the table's prices.
+`micke-page-text --links` gives `{text,href}` in ~7.2 s but no `@ref`, so it
+can reach a destination, never click one. Negatives: `--skeleton` returned 91
+refs, all browser chrome, 0 page links (skeleton then `--root webarea`: 6.35 s
+/ 110 KB, still a full dump); `--max-depth` truncation is non-monotonic (depth
+6 → 140 refs/2 links; depth 8 → 54 refs/0 links). And 31% of refs are
+`offscreen` and click fine — do not filter them out.
+
 ## Content vs. interaction: `micke-page-text`
 
 The AT-SPI tree is the **interaction** path (snapshot → act on `@ref`). It is
