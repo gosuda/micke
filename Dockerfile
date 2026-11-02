@@ -31,6 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         at-spi2-core \
         # --- agent apps ----------------------------------------------------
         chromium \
+        # --- remote view: x11vnc mirrors the Xvfb display on :5900,
+        #     websockify serves the noVNC web client on :6080 ---------------
+        x11vnc \
+        novnc \
+        websockify \
         # --- helpers -------------------------------------------------------
         xdotool \
         xclip \
