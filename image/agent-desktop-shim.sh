@@ -63,6 +63,18 @@ if [ "$ok" = "false" ]; then
         find)
             echo "micke: hint: prefer micke-find <text> [--role R] (one filtered snapshot) — find spends its whole budget on heavy pages" >&2
             ;;
+        click|scroll-to)
+            # TIMEOUT + not_delivered is the below-fold signature: the whole
+            # actionability budget dies in preparatory scroll and nothing is
+            # sent. A TIMEOUT whose input was already delivered (post-action
+            # wait) keeps a delivered_* disposition and gets no hint.
+            # Measured shape (agent-desktop v1.0.2): disposition is an object
+            # {"delivery":..,"retry":..}, not a bare string.
+            disp=$(printf '%s' "$out" | jq -r '.error.disposition.delivery // empty' 2>/dev/null) || disp=""
+            if [ "$code" = "TIMEOUT" ] && [ "$disp" = "not_delivered" ]; then
+                echo "micke: hint: below-fold targets die in preparatory scroll — micke-key ctrl+End / PageDown to scroll, re-find the target (refs are snapshot-scoped), then click" >&2
+            fi
+            ;;
     esac
 fi
 

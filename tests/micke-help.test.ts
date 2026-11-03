@@ -91,6 +91,15 @@ describe("micke-help", () => {
     expect(r.stdout).toContain("--headed type");
   });
 
+  test("teaches the below-fold recipe: keyboard-scroll, re-find, then click", () => {
+    const r = run();
+    expect(r.stdout).toContain("Below-fold");           // names the trap
+    expect(r.stdout).toContain("micke-key");            // the scroll tool
+    expect(r.stdout).toContain("ctrl+End");             // a working scroll combo
+    expect(r.stdout).toContain("re-find");              // refs are snapshot-scoped
+    expect(r.stdout).toContain("scroll-to");            // both dead commands named
+  });
+
   test("states the fresh-bash contract (cwd/env do not persist)", () => {
     const r = run();
     expect(r.stdout).toContain("fresh bash");

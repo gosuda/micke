@@ -128,6 +128,55 @@ describe("agent-desktop point-of-use hints (stderr only)", () => {
     expect(r.stderr.trim().split("\n")).toHaveLength(1);
   });
 
+  test("click TIMEOUT/not_delivered (below-fold death) gets the keyboard-scroll recipe on stderr", () => {
+    // Real shape from the shipped agent-desktop v1.0.2 (measured on the image
+    // by tests/e2e/below-fold-click.test.ts): the actionability budget dies in
+    // preparatory scroll, nothing is sent, disposition.delivery is
+    // "not_delivered" — and disposition is an OBJECT, not a bare string.
+    const out = `{"version":"2.5","ok":false,"command":"click","error":{"code":"TIMEOUT","message":"Pointer target did not become actionable within the wait budget","details":{"kind":"actionability_timeout","timeout_ms":5000},"disposition":{"delivery":"not_delivered","retry":"safe"}}}`;
+    const r = run(out, 0, ["click", "@s2:e191"]);
+    expect(r.rc).toBe(1);
+    expect(r.stdout).toBe(out + "\n"); // stdout is the envelope, nothing added
+    expect(r.stderr).toContain("micke-key");
+    expect(r.stderr).toContain("ctrl+End");
+    expect(r.stderr).toContain("re-find");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1); // exactly one line
+  });
+
+  test("scroll-to TIMEOUT/not_delivered gets the same recipe", () => {
+    const out = `{"version":"2.5","ok":false,"command":"scroll-to","error":{"code":"TIMEOUT","message":"Target did not become actionable within the wait budget","details":{"kind":"actionability_timeout"},"disposition":{"delivery":"not_delivered","retry":"safe"}}}`;
+    const r = run(out, 0, ["scroll-to", "@s2:e5"]);
+    expect(r.rc).toBe(1);
+    expect(r.stdout).toBe(out + "\n");
+    expect(r.stderr).toContain("micke-key");
+    expect(r.stderr).toContain("re-find");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  test("a delivered click (ok:true) gets no hint", () => {
+    const out = `{"version":"2.5","ok":true,"command":"click","data":{"action":"click","disposition":{"delivery":"delivered_unverified","retry":"unsafe"}}}`;
+    const r = run(out, 0, ["click", "@s2:e191"]);
+    expect(r.rc).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(out + "\n");
+  });
+
+  test("click TIMEOUT whose input was already delivered (post-action wait) gets no scroll hint", () => {
+    // A --wait selector can time out AFTER the click landed; that envelope
+    // keeps the action's delivered_* disposition and is not a below-fold death.
+    const out = `{"version":"2.5","ok":false,"command":"click","error":{"code":"TIMEOUT","message":"after_action wait timed out","disposition":{"delivery":"delivered_unverified","retry":"unsafe"}}}`;
+    const r = run(out, 0, ["click", "@s2:e191"]);
+    expect(r.rc).toBe(1);
+    expect(r.stderr).toBe("");
+  });
+
+  test("an unrelated failure code on scroll-to gets no hint", () => {
+    const out = `{"version":"2.5","ok":false,"command":"scroll-to","error":{"code":"STALE_REF","message":"ref no longer resolves","disposition":{"delivery":"not_delivered","retry":"safe"}}}`;
+    const r = run(out, 0, ["scroll-to", "@s2:e5"]);
+    expect(r.rc).toBe(1);
+    expect(r.stderr).toBe("");
+  });
+
   test("successful envelopes stay hint-free on stderr", () => {
     const out = `{"version":"2.5","ok":true,"command":"type","data":{}}`;
     const r = run(out, 0, ["type", "hi"]);

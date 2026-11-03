@@ -37,6 +37,8 @@ Rules:
   - Headless `agent-desktop type` is refused on real pages (POLICY_DENIED /
     ACTION_NOT_SUPPORTED); `agent-desktop --headed type` also works and is
     the agent-desktop-native alternative to micke-type.
+  - Below-fold targets: `click`/`scroll-to` on them can time out in preparatory
+    scroll (TIMEOUT/not_delivered) — keyboard-scroll first (`micke-key ctrl+Home/ctrl+End/PageDown`), re-find (refs are snapshot-scoped), then click.
   - `agent-desktop` exits non-zero when its JSON envelope says ok:false —
     `set -e` and `&&` are trustworthy.
   - Every session_shell call is a fresh bash: cwd and env do NOT persist.
