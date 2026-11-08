@@ -13,7 +13,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { assetNameFor, installManagedRungv, parseSums } from "../src/rungvinstall.js";
+import { assetNameFor, installManagedRungv } from "../src/rungvinstall.js";
+import { parseSums } from "../src/release.js";
 import { rungvBinary, rungvBinaryName } from "../src/gvxio.js";
 import { callTool, spawnDaemon, type Daemon } from "./helpers.js";
 import { FAKE_RUNGV, fakeState, type FakeState } from "./fake/harness.js";

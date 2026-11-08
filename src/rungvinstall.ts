@@ -22,6 +22,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { managedRungvPath, rungvBinDir, rungvBinaryName, rungvVersion } from "./gvxio.js";
+import { parseSums, sha256File } from "./release.js";
 
 export const GVX_RELEASE_BASE = "https://github.com/gfire-sigs/gvx/releases";
 
@@ -41,23 +42,6 @@ export function assetNameFor(platform: string, arch: string, tag: string): strin
   if (p === "darwin" && a === "amd64") return null; // no such asset
   const ext = p === "windows" ? "zip" : "tar.gz";
   return `rungv-${tag}-${p}-${a}.${ext}`;
-}
-
-/** One SHA256SUMS line: `<hex>  <filename>` → Map<filename, hex>. */
-export function parseSums(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const line of text.split("\n")) {
-    const m = line.trim().match(/^([0-9a-f]{64})\s+(\S+)$/);
-    if (m) out.set(m[2], m[1]);
-  }
-  return out;
-}
-
-/** Hex sha256 of a file, streamed (archives are ~27 MB). */
-async function sha256File(path: string): Promise<string> {
-  const hasher = new Bun.CryptoHasher("sha256");
-  for await (const chunk of Bun.file(path).stream()) hasher.update(chunk);
-  return hasher.digest("hex");
 }
 
 /** Await a child process; returns {rc, stderr} (tar/powershell extract). */
