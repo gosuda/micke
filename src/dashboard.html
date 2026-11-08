@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<!-- micke dashboard — a single-file SPA. Pure HTML+CSS+JS in ONE file, no
+     framework, no build step, no network/CDN references (repo contract).
+     Session data arrives only via /api/*, fetched by the script below. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>micke dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #111; }
+  h1 { font-size: 1.4rem; }
+  a { color: #0366d6; }
+  code { font-family: ui-monospace, monospace; }
+  .secondary { color: #666; font-size: .85em; }
+  /* [hidden] must win over the display rules below (.backdrop etc. set
+     display:flex, which would otherwise override the hidden attribute). */
+  [hidden] { display: none !important; }
+
+  /* Poll-failure banner: alarming but not modal — the last known rows stay
+     on screen so the list going blank teaches nothing. */
+  #banner { background: #fde8e8; border: 1px solid #f0b4b4; color: #7a1f1f;
+            padding: .5rem .8rem; border-radius: 6px; margin-bottom: 1rem; }
+
+  /* Create form */
+  #create { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+  #create input { padding: .4rem .6rem; border: 1px solid #bbb;
+                  border-radius: 6px; min-width: 15rem; }
+  #create button { padding: .4rem 1rem; }
+  .spin { display: inline-block; width: .9em; height: .9em;
+          border: 2px solid #999; border-top-color: transparent;
+          border-radius: 50%; animation: spin 1s linear infinite;
+          vertical-align: -.1em; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { color: #b3261e; }
+
+  /* Session table */
+  table { border-collapse: collapse; margin-top: 1rem; }
+  th, td { border: 1px solid #bbb; padding: .4rem .8rem; text-align: left;
+           vertical-align: top; }
+  th { background: #f2f2f2; }
+  .badge { padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; }
+  .badge-ready { background: #e6f4ea; color: #137333; }
+  .badge-orphaned { background: #f1f3f4; color: #5f6368; }
+  .ellip { max-width: 18rem; overflow: hidden; text-overflow: ellipsis;
+           white-space: nowrap; }
+  #empty { color: #555; }
+  button { padding: .2rem .6rem; }
+  button:disabled { opacity: .5; cursor: wait; }
+
+  /* Screenshot modal */
+  .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .5);
+              display: flex; align-items: center; justify-content: center;
+              z-index: 10; }
+  .panel { background: #fff; border-radius: 8px; padding: 1rem;
+           max-width: 92vw; max-height: 92vh; overflow: auto; }
+  .panel-bar { display: flex; align-items: center; gap: .8rem;
+               margin-bottom: .6rem; flex-wrap: wrap; }
+  #shot-img { max-width: 85vw; max-height: 75vh; border: 1px solid #ccc; }
+
+  /* noVNC overlay: the whole viewport, above everything else */
+  #vnc-overlay { position: fixed; inset: 0; background: #111; z-index: 20;
+                 display: flex; flex-direction: column; }
+  #vnc-overlay .panel-bar { background: #222; color: #eee; margin: 0;
+                            padding: .5rem .8rem; }
+  #vnc-frame { flex: 1; border: 0; width: 100%; }
+</style>
+</head>
+<body>
+<h1>micke dashboard</h1>
+
+<div id="banner" hidden>daemon unreachable — showing last known sessions</div>
+
+<form id="create">
+  <!-- Placeholders name the server defaults (src/gvxio.ts, src/supervisor.ts):
+       leaving a field empty sends nothing, and the server picks these. -->
+  <input name="image" placeholder="ghcr.io/gosuda/micke:latest" autocomplete="off">
+  <input name="workspace" placeholder="/absolute/host/dir (default: auto-created per session)" autocomplete="off">
+  <input name="screen" placeholder="WIDTHxHEIGHTxDEPTH (default 1280x800x24)" autocomplete="off">
+  <button type="submit">create session</button>
+</form>
+<p id="creating" hidden><span class="spin"></span> creating session… (first boot can take minutes on a pull)</p>
+<p id="create-error" class="error" hidden></p>
+<p id="create-hint" class="secondary" hidden></p>
+
+<main id="app">
+  <table id="sessions">
+    <thead><tr><th>session</th><th>status</th><th>uptime</th><th>image</th><th>workspace</th><th>screen</th><th>actions</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="empty" hidden>no sessions</p>
+</main>
+<p id="action-error" class="error" hidden></p>
+
+<!-- Screenshot panel: one at a time, per-session state lives in `state.shot`. -->
+<div id="shot-backdrop" class="backdrop" hidden>
+  <div class="panel">
+    <div class="panel-bar">
+      <strong id="shot-title"></strong>
+      <span id="shot-dims" class="secondary"></span>
+      <label class="secondary"><input type="checkbox" id="shot-auto"> auto-refresh (5 s)</label>
+      <button type="button" id="shot-refresh">refresh</button>
+      <button type="button" id="shot-close">close</button>
+    </div>
+    <img id="shot-img" alt="sandbox screenshot">
+    <p id="shot-error" class="error" hidden></p>
+  </div>
+</div>
+
+<!-- noVNC overlay: full viewport, one at a time (one element ⇒ never two). -->
+<div id="vnc-overlay" hidden>
+  <div class="panel-bar">
+    <strong id="vnc-title"></strong>
+    <a id="vnc-newtab" href="." target="_blank" rel="noopener">open in new tab</a>
+    <button type="button" id="vnc-close">close</button>
+  </div>
+  <iframe id="vnc-frame" title="noVNC session" allow="clipboard-read; clipboard-write"></iframe>
+</div>
+
+<script>
+"use strict";
+
+// ---- helpers ---------------------------------------------------------------
+
+// SECURITY: every value that arrives from the API — session ids, image names,
+// workspace paths, error strings, URLs — passes through esc() before it is
+// interpolated into HTML below (same contract as the old server-rendered
+// page). No eval, no new Function, no innerHTML built from unescaped API
+// data.
+const esc = (s) => String(s)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+// "2m 31s"-style uptime — mirrors the humanUptime() the old server-rendered
+// page had; the SPA owns the semantics now (dashboard.ts keeps no copy).
+function humanUptime(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + "d " + h + "h " + m + "m";
+  if (h > 0) return h + "h " + m + "m " + (s % 60) + "s";
+  if (m > 0) return m + "m " + (s % 60) + "s";
+  return s + "s";
+}
+
+const $ = (id) => document.getElementById(id);
+
+// ---- state -----------------------------------------------------------------
+
+// The whole UI's state: the last poll's rows plus which panel is open.
+// Plain object + functions; no classes-for-style, no framework indirection.
+const state = {
+  rows: [],
+  shot: { id: null, timer: null, objectUrl: null }, // screenshot panel
+  vncId: null, // session whose noVNC overlay is open
+};
+
+const els = {
+  banner: $("banner"),
+  table: $("sessions"),
+  rows: $("rows"),
+  empty: $("empty"),
+  actionError: $("action-error"),
+  form: $("create"),
+  creating: $("creating"),
+  createError: $("create-error"),
+  createHint: $("create-hint"),
+  shotBackdrop: $("shot-backdrop"),
+  shotTitle: $("shot-title"),
+  shotDims: $("shot-dims"),
+  shotAuto: $("shot-auto"),
+  shotImg: $("shot-img"),
+  shotError: $("shot-error"),
+  vncOverlay: $("vnc-overlay"),
+  vncTitle: $("vnc-title"),
+  vncNewtab: $("vnc-newtab"),
+  vncFrame: $("vnc-frame"),
+};
+
+// ---- polling ----------------------------------------------------------------
+
+const POLL_MS = 3000;
+let pollTimer = null;
+let pollInFlight = false;
+
+// One poll cycle. A failure raises the banner but keeps the last known rows
+// rendered; the banner clears on the next successful poll, nothing else.
+async function poll() {
+  if (pollInFlight) return; // a slow poll must not stack on the interval
+  pollInFlight = true;
+  try {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    state.rows = data.sessions; // server sorts by created_at; keep that order
+    els.banner.hidden = true;
+    render();
+  } catch {
+    els.banner.hidden = false;
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  void poll(); // refresh now…
+  pollTimer = setInterval(poll, POLL_MS); // …and on every tick
+}
+
+function stopPolling() {
+  if (pollTimer !== null) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+// WHY pause: a hidden tab renders nothing, so its polls are pure load on the
+// daemon (and the battery). Becoming visible refreshes at once so nothing
+// stale stays on screen.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopPolling();
+  else startPolling();
+});
+
+// ---- session list ------------------------------------------------------------
+
+function actionButton(action, sid, label) {
+  return '<button type="button" data-action="' + action + '" data-sid="' + esc(sid) + '">' + label + "</button>";
+}
+
+function render() {
+  els.empty.hidden = state.rows.length !== 0;
+  els.table.hidden = state.rows.length === 0;
+  // innerHTML is fine here: every API value below goes through esc() first.
+  els.rows.innerHTML = state.rows.map((r) => {
+    const badge = '<span class="badge badge-' + esc(r.status) + '">' + esc(r.status) + "</span>";
+    // Orphaned = pidfile without a sandbox: only close makes sense, and the
+    // "stale sandbox" note says why the other actions are missing.
+    const actions = r.status === "ready" && r.novnc_url
+      ? actionButton("shot", r.session_id, "screenshot") + " " +
+        actionButton("vnc", r.session_id, "vnc") + " " +
+        actionButton("del", r.session_id, "delete")
+      : '<span class="secondary">stale sandbox</span> ' +
+        actionButton("del", r.session_id, "delete");
+    const ws = r.workspace
+      ? '<span class="ellip" style="display:inline-block" title="' + esc(r.workspace) + '">' + esc(r.workspace) + "</span>"
+      : "—";
+    return "<tr>" +
+      "<td><code>" + esc(r.session_id) + "</code></td>" +
+      "<td>" + badge + "</td>" +
+      "<td>" + esc(humanUptime(r.uptime_seconds)) + "</td>" +
+      '<td class="ellip" title="' + esc(r.image) + '">' + esc(r.image) + "</td>" +
+      "<td>" + ws + "</td>" +
+      "<td>" + esc(r.screen) + "</td>" +
+      "<td>" + actions + "</td>" +
+      "</tr>";
+  }).join("\n");
+}
+
+// One delegated listener survives re-renders (per-row handlers would be
+// re-wired on every 3 s poll).
+els.rows.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const row = state.rows.find((r) => r.session_id === btn.dataset.sid);
+  if (!row) return; // row vanished between render and click
+  if (btn.dataset.action === "shot") openScreenshot(row);
+  else if (btn.dataset.action === "vnc") openVnc(row);
+  else if (btn.dataset.action === "del") void removeSession(row, btn);
+});
+
+// ---- delete -------------------------------------------------------------------
+
+// Plain-English confirm, then DELETE. The button stays disabled while
+// pending so a slow close can't be double-fired; the row leaves on the
+// immediate re-poll, not on the next tick.
+async function removeSession(row, btn) {
+  if (!window.confirm("Close session " + row.session_id + "? Its sandbox is removed.")) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/sessions/" + encodeURIComponent(row.session_id), { method: "DELETE" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => null);
+      throw new Error(j && j.error ? j.error.code + ": " + j.error.message : "HTTP " + res.status);
+    }
+    els.actionError.hidden = true;
+    await poll();
+  } catch (err) {
+    btn.disabled = false; // the close failed; leave the row actionable
+    els.actionError.textContent = "delete failed: " + (err && err.message ? err.message : String(err));
+    els.actionError.hidden = false;
+  }
+}
+
+// ---- screenshot panel -----------------------------------------------------------
+
+// The PNG is fetched with fetch() (not a bare <img src>) on purpose: errors
+// come back as JSON we want to SHOW, which an <img> would swallow silently.
+// The blob becomes an object URL for the <img> to render.
+async function refreshShot() {
+  const id = state.shot.id;
+  if (!id) return;
+  try {
+    // Cache-buster: responses are no-store, but a unique query makes every
+    // manual/auto refresh a genuinely new request even through a memory
+    // cache, and makes each refresh visible in devtools.
+    const res = await fetch("/api/sessions/" + encodeURIComponent(id) + "/screenshot.png?t=" + Date.now());
+    if (!res.ok) {
+      let msg = "HTTP " + res.status;
+      try {
+        const j = await res.json();
+        if (j && j.error && j.error.message) msg = j.error.message;
+      } catch { /* body wasn't JSON (e.g. a bare 500) — keep the HTTP line */ }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    if (state.shot.id !== id) return; // panel switched sessions mid-flight
+    if (state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl); // don't leak the old frame
+    state.shot.objectUrl = URL.createObjectURL(blob);
+    els.shotImg.src = state.shot.objectUrl;
+    const w = res.headers.get("x-micke-width");
+    const h = res.headers.get("x-micke-height");
+    els.shotDims.textContent = w && h ? w + "×" + h : "";
+    els.shotError.hidden = true;
+  } catch (err) {
+    if (state.shot.id !== id) return;
+    els.shotError.textContent = err && err.message ? err.message : String(err);
+    els.shotError.hidden = false;
+  }
+}
+
+function openScreenshot(row) {
+  state.shot.id = row.session_id;
+  els.shotTitle.textContent = "screenshot — " + row.session_id;
+  els.shotImg.removeAttribute("src"); // drop the previous session's frame
+  els.shotError.hidden = true;
+  els.shotDims.textContent = "";
+  els.shotBackdrop.hidden = false;
+  void refreshShot();
+}
+
+// Close clears the per-panel auto-refresh timer and the object URL: the 5 s
+// interval must never outlive the panel.
+function closeScreenshot() {
+  if (state.shot.timer !== null) clearInterval(state.shot.timer);
+  if (state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
+  state.shot = { id: null, timer: null, objectUrl: null };
+  els.shotAuto.checked = false;
+  els.shotBackdrop.hidden = true;
+  els.shotImg.removeAttribute("src");
+}
+
+$("shot-close").addEventListener("click", closeScreenshot);
+$("shot-refresh").addEventListener("click", () => void refreshShot());
+els.shotAuto.addEventListener("change", () => {
+  if (state.shot.timer !== null) clearInterval(state.shot.timer);
+  state.shot.timer = els.shotAuto.checked ? setInterval(() => void refreshShot(), 5000) : null;
+});
+
+// ---- noVNC overlay ----------------------------------------------------------------
+
+// The overlay is ONE element, so "only one at a time" holds by construction:
+// opening another session's VNC replaces the iframe (and its websocket).
+function openVnc(row) {
+  if (!row.novnc_url) return; // orphaned rows have none — the button isn't shown
+  state.vncId = row.session_id;
+  els.vncTitle.textContent = "noVNC — " + row.session_id;
+  // novnc_url already ends in /vnc.html; join params with ? or & as fits.
+  const join = row.novnc_url.includes("?") ? "&" : "?";
+  els.vncFrame.src = row.novnc_url + join + "autoconnect=true&resize=scale";
+  els.vncNewtab.href = row.novnc_url; // the bare URL, no params
+  els.vncOverlay.hidden = false;
+}
+
+function closeVnc() {
+  // about:blank tears the iframe — and its websocket — down now, not at GC.
+  els.vncFrame.src = "about:blank";
+  els.vncOverlay.hidden = true;
+  state.vncId = null;
+}
+
+$("vnc-close").addEventListener("click", closeVnc);
+
+// ---- create form --------------------------------------------------------------------
+
+els.form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  // Only the fields the user filled are sent; empties are omitted so the
+  // server falls back to its defaults — exactly what the placeholders say.
+  const body = {};
+  for (const el of els.form.querySelectorAll("input")) {
+    const v = el.value.trim();
+    if (v) body[el.name] = v;
+  }
+  setCreatePending(true);
+  try {
+    const res = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => null);
+      const err = new Error(j && j.error ? j.error.code + ": " + j.error.message : "HTTP " + res.status);
+      err.hint = j && j.error && j.error.hint ? j.error.hint : null;
+      throw err;
+    }
+    els.form.reset();
+    els.createError.hidden = true;
+    els.createHint.hidden = true;
+    await poll(); // the new row shows up now, not 3 s later
+  } catch (err) {
+    els.createError.textContent = err && err.message ? err.message : String(err);
+    els.createError.hidden = false;
+    els.createHint.textContent = (err && err.hint) || "";
+    els.createHint.hidden = !(err && err.hint);
+  } finally {
+    setCreatePending(false);
+  }
+});
+
+function setCreatePending(pending) {
+  for (const el of els.form.querySelectorAll("input,button")) el.disabled = pending;
+  els.creating.hidden = !pending;
+}
+
+// ---- safety net -----------------------------------------------------------------------
+
+// One failed promise must never take the page down or hide in the console:
+// surface it where the user is already looking.
+window.addEventListener("unhandledrejection", (e) => {
+  e.preventDefault();
+  const reason = e.reason;
+  els.actionError.textContent = "unexpected error: " + (reason && reason.message ? reason.message : reason);
+  els.actionError.hidden = false;
+});
+
+// ---- boot ------------------------------------------------------------------------------
+
+// If the tab is hidden at load, the visibilitychange handler above starts
+// polling on first show; polling while hidden is what we avoid.
+if (!document.hidden) startPolling();
+</script>
+</body>
+</html>

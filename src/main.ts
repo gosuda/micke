@@ -65,7 +65,7 @@ async function route(req: Request): Promise<Response> {
   // through to dashboard/404.
   const apiRes = await handleApi(req, sup);
   if (apiRes) return apiRes;
-  if (path === "/") return dashboardResponse(() => sup.listSessions());
+  if (path === "/") return dashboardResponse();
   return new Response("not found\n", { status: 404 });
 }
 
