@@ -5,7 +5,10 @@
 // for web/Chromium work, agent-desktop for other desktop apps — because the
 // description is the only pointer a zero-context agent gets before it opens
 // a shell. Guard both names so a future description pass cannot silently
-// drop a CLI from the surface. Fast tier: the fake rungv, no sandbox.
+// drop a CLI from the surface. The VNC hint gets the same guard: the
+// desktop being live and human-interactive over noVNC is equally
+// undiscoverable, and it is why the CLIs' visible windows are a feature.
+// Fast tier: the fake rungv, no sandbox.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -34,5 +37,6 @@ describe("session_shell's description names both agent CLIs", () => {
     expect(shell, "session_shell missing from tools/list").toBeDefined();
     expect(shell!.description).toContain("agent-browser");
     expect(shell!.description).toContain("agent-desktop");
+    expect(shell!.description).toContain("VNC");
   }, 15_000);
 });

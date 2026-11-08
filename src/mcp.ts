@@ -15,12 +15,13 @@ import { defaultStateDir } from "./gvxio.js";
 
 const CREATE_DESC = [
   "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-browser + agent-desktop + noVNC) and return its session_id and novnc_url.",
-  "Open novnc_url in a browser to watch or take over the desktop.",
+  "Open novnc_url in a browser to watch or take over the desktop — windows the CLIs open (agent-browser's chromium included) are live there, so the user can follow the work and interact with the same desktop over VNC.",
 ].join(" ");
 
 const SHELL_DESC = [
   "Run bash in the session. EVERY call is a fresh bash: cwd and exported env do NOT persist between calls, so make each command self-contained.",
-  "Web/Chromium work goes through `agent-browser`, other desktop apps through `agent-desktop` (`--help` is the manual for both).",
+  "Web/Chromium work goes through `agent-browser`, other desktop apps through `agent-desktop` (`--help` is the manual for both) — prefer them over raw-shell equivalents when they fit the task.",
+  "Whatever they drive is a real window on the noVNC desktop, so the user can watch it live and interact over VNC while commands run.",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}.",
 ].join(" ");
 
