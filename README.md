@@ -20,11 +20,10 @@ bun start   # daemon on http://127.0.0.1:7800/ (MCP + dashboard; no auto-restart
 
 Connect any Streamable-HTTP MCP client to `http://127.0.0.1:7800/mcp`. The
 surface is exactly four tools — `session_create`, `session_list`,
-`session_close`, `session_shell` — and their descriptions in `src/mcp.ts` are
-the operating manual (stateless-shell contract, snapshot/click/verify loop,
-guest helpers `micke-chromium` / `micke-find` / `micke-state` / `micke-key` /
-`micke-page-text`). OpenCode example (`oauth: false` matters for the no-auth
-loopback server):
+`session_close`, `session_shell` — driving a stock guest: Debian + chromium +
+pinned `agent-desktop@1.2.0` (`agent-desktop --help` is the manual; the
+sanctioned URL route is `agent-desktop launch chromium --arg=<url>`). OpenCode
+example (`oauth: false` matters for the no-auth loopback server):
 
 ```json
 {

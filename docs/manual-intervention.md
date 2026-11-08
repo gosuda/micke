@@ -19,8 +19,9 @@ call — and hand the desk back.
    non-fatal: if x11vnc/websockify are not running, the session still reports
    `ready` and the URL can be dead; the agent can check `/tmp/x11vnc.log` and
    `/tmp/novnc.log` in the session. A `ready` session can also show an empty
-   desktop because the browser crashed or was never launched: run
-   `micke-state` (or relaunch with `micke-chromium <url>`) before pausing.
+   desktop because the browser crashed or was never launched: check liveness
+   with `agent-desktop list-apps` (or `list-windows`, or a `snapshot`) and
+   relaunch with `agent-desktop launch chromium --arg=<url>` before pausing.
 3. **The human acts** — e.g. completes the SSO login. The credential goes
    from the human's fingers into the desktop, not through the agent: micke
    has no keylogger and no VNC-side input API, so the credential does not
