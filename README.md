@@ -119,8 +119,9 @@ PATH so a hand-installed rungv in `/usr/local/bin` or `~/.local/bin`
 stays visible), a launchd agent `dev.gosuda.micke` (`KeepAlive`; log at
 `$MICKE_STATE_DIR/daemon.log`), or on Windows a logon-triggered scheduled
 task `micke` (registered unelevated; where domain policy denies task
-creation, an HKCU Run entry stands in — the daemon hides its own console
-window as it starts, so logon shows at most a sub-second flash). `service uninstall` / `status` /
+creation, an HKCU Run entry stands in) that launches the daemon through
+`conhost --headless` — no console window on any default-terminal
+setting, Windows 10 1809 or newer. `service uninstall` / `status` /
 `restart` manage it, and
 `micke help` lists every command. Registration needs the compiled
 binary — a bun dev tree is refused with the remedy (from source,

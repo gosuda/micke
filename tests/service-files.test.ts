@@ -69,13 +69,40 @@ describe("launchdPlist", () => {
 });
 
 describe("windows registration payloads", () => {
-  // The v0.1.1 Windows defect: schtasks /Create /SC ONLOGON is denied for a
-  // standard user even for their own account, so `micke service install`
-  // died for every non-elevated user. These pin its unelevated replacement.
+  // Two shipped Windows defects pinned here. v0.1.2: schtasks /Create
+  // /SC ONLOGON is denied for a standard user — replaced by the unelevated
+  // Register-ScheduledTask recipe. v0.1.3: the daemon hid its own console
+  // with ShowWindow, which a scheduled task's startup race ignores on
+  // Windows 10 (pyinstaller#8798) and Windows Terminal's emulated handle
+  // ignores outright on Windows 11 (microsoft/terminal#15311) — replaced
+  // by launching through conhost --headless, where no window ever exists.
   test("the task registers with a current-user logon trigger at Limited run level", () => {
     expect(WIN_TASK_PS.register).toContain("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME");
     expect(WIN_TASK_PS.register).toContain("-RunLevel Limited");
     expect(WIN_TASK_PS.register).toContain(`-TaskName '${WIN_TASK}'`);
+  });
+
+  test("every launch goes through headless conhost — the window never exists", () => {
+    // conhost is GUI-subsystem, so the default-terminal routing never
+    // applies, and --headless creates the console with no window at all
+    // (Win10 1809+; the same mechanism every ConPTY consumer runs on).
+    expect(WIN_TASK_PS.register).toContain(`-Execute "$env:WINDIR\\System32\\conhost.exe"`);
+    expect(WIN_TASK_PS.register).toContain(`('--headless "' + $env:MICKE_EXE + '" daemon')`);
+    expect(WIN_RUNKEY_PS.set).toContain(`conhost.exe" --headless`);
+    expect(WIN_DAEMON_PS.start).toContain(`'\\System32\\conhost.exe'`);
+    expect(WIN_DAEMON_PS.start).toContain(`('--headless "' + $env:MICKE_EXE + '" daemon')`);
+  });
+
+  test("no payload hides a window from inside the process or shells out to schtasks", () => {
+    // The in-process hide is the mechanism that failed both ways (Win10
+    // race, Win11 handle emulation); it must not come back, and neither
+    // must the denied schtasks path.
+    const payloads = [...Object.values(WIN_TASK_PS), ...Object.values(WIN_RUNKEY_PS), ...Object.values(WIN_DAEMON_PS)];
+    for (const p of payloads) {
+      expect(p).not.toContain("ShowWindow");
+      expect(p).not.toContain("schtasks");
+      expect(p).not.toContain("ONLOGON");
+    }
   });
 
   test("no 72-hour execution limit: PT0S as a property assignment, not a parameter", () => {
@@ -102,15 +129,6 @@ describe("windows registration payloads", () => {
     expect(WIN_DAEMON_PS.stop).toContain(`Name = 'micke.exe'`);
     expect(WIN_DAEMON_PS.stop).toContain("-match ' daemon$'");
     expect(WIN_DAEMON_PS.count).toContain("-match ' daemon$'");
-  });
-
-  test("no payload shells out to schtasks or uses a machine-wide ONLOGON trigger", () => {
-    // The denied mechanism must not creep back in through any payload.
-    const payloads = [...Object.values(WIN_TASK_PS), ...Object.values(WIN_RUNKEY_PS), ...Object.values(WIN_DAEMON_PS)];
-    for (const p of payloads) {
-      expect(p).not.toContain("schtasks");
-      expect(p).not.toContain("ONLOGON");
-    }
   });
 });
 

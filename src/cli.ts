@@ -9,7 +9,6 @@
 
 import { MICKE_VERSION } from "./version.js";
 import { serviceInstall, serviceRestart, serviceStatus, serviceUninstall } from "./service.js";
-import { hideConsoleWindow } from "./winhide.js";
 import { performUpgrade } from "./selfupdate.js";
 
 const USAGE = `micke ${MICKE_VERSION} — gvx sandbox desktops, managed over MCP
@@ -42,9 +41,6 @@ async function main(argv: string[]): Promise<number> {
     case "daemon":
       // Foreground, exactly what service managers launch. Never returns
       // (signal handlers exit); if it ever does, that was a clean stop.
-      // Windows first: the scheduled task's console window disappears the
-      // moment the daemon starts (anywhere else this is a no-op).
-      hideConsoleWindow();
       await (await import("./main.js")).main();
       return 0;
     case "version":

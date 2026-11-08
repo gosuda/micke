@@ -20,6 +20,18 @@
 // after every logon, and the -ExecutionTimeLimit PARAMETER silently drops
 // a zero timespan on some builds.
 //
+// The daemon is launched through `conhost.exe --headless`, never directly:
+// a console-subsystem exe started by the task gets a console window, and
+// hiding it from inside the process does not survive Windows 11 — with
+// Windows Terminal as the default host, GetConsoleWindow returns an
+// emulated handle and ShowWindow(SW_HIDE) is ignored outright
+// (microsoft/terminal#15311; pyinstaller#8022 gave up on the same path).
+// conhost.exe is GUI-subsystem, so the default-terminal routing never
+// applies, and --headless creates the console with no window at all —
+// the same mechanism every ConPTY consumer (Windows Terminal, VS Code)
+// runs on. Manual `micke daemon` in a terminal keeps its window and
+// output, as a debug run should.
+//
 // The generators (systemdUnit, launchdPlist, the WIN_*_PS payloads, unitPath)
 // are pure — tests assert their content. The actions shell out through a
 // local spawnSync `run()` helper, throw a plain Error carrying the remedy
@@ -94,10 +106,12 @@ export function powershellArgs(payload: string): string[] {
  * The exe travels in $env:MICKE_EXE, so a path with spaces or non-ASCII
  * user names can never break quoting. `register` is the unelevated
  * recipe: current-user logon trigger + Limited run level (see the header).
+ * The action launches through conhost --headless: no console window, on
+ * every default-terminal setting (see the header's WHY).
  */
 export const WIN_TASK_PS = {
   register: [
-    "$a = New-ScheduledTaskAction -Execute $env:MICKE_EXE -Argument 'daemon'",
+    `$a = New-ScheduledTaskAction -Execute "$env:WINDIR\\System32\\conhost.exe" -Argument ('--headless "' + $env:MICKE_EXE + '" daemon')`,
     "$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME",
     "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
     "$s.ExecutionTimeLimit = 'PT0S'",
@@ -112,10 +126,12 @@ export const WIN_TASK_PS = {
  * The Run-key fallback for policy-locked machines (some domain-joined
  * boxes deny non-admin task creation entirely). The value name is
  * WIN_TASK, so the `get` payload's `.micke` property access below is that
- * same name spelled out.
+ * same name spelled out. The value is the same headless-conhost command
+ * line the task action uses: the Run key is ShellExecute'd, and conhost
+ * being GUI-subsystem means no default-terminal window either way.
  */
 export const WIN_RUNKEY_PS = {
-  set: `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${WIN_TASK}' -Value ('"' + $env:MICKE_EXE + '" daemon')`,
+  set: `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${WIN_TASK}' -Value ('"' + $env:WINDIR + '\\System32\\conhost.exe" --headless "' + $env:MICKE_EXE + '" daemon')`,
   get: `(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${WIN_TASK}' -ErrorAction SilentlyContinue).micke`,
   remove: `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${WIN_TASK}' -ErrorAction SilentlyContinue`,
 } as const;
@@ -129,7 +145,10 @@ export const WIN_RUNKEY_PS = {
  */
 export const WIN_DAEMON_PS = {
   stop: `Get-CimInstance Win32_Process -Filter "Name = 'micke.exe'" | Where-Object { $_.CommandLine -match ' daemon$' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
-  start: `Start-Process -FilePath $env:MICKE_EXE -ArgumentList 'daemon' -WindowStyle Hidden`,
+  // Same headless-conhost command line as the task action (see header):
+  // a plain Start-Process of micke.exe would flash a console window,
+  // which is exactly what this whole dance exists to avoid.
+  start: `Start-Process -FilePath ($env:WINDIR + '\\System32\\conhost.exe') -ArgumentList ('--headless "' + $env:MICKE_EXE + '" daemon')`,
   count: `Get-CimInstance Win32_Process -Filter "Name = 'micke.exe'" | Where-Object { $_.CommandLine -match ' daemon$' } | Measure-Object | Select-Object -ExpandProperty Count`,
 } as const;
 
@@ -227,6 +246,25 @@ function winStartDaemon(exe: string, backend: "task" | "runkey"): RunResult {
   return run(powershellArgs(WIN_DAEMON_PS.start), { MICKE_EXE: exe });
 }
 
+/**
+ * Wait briefly for a daemon process to exist. Start-ScheduledTask
+ * succeeding only means the scheduler ACCEPTED the start — a bad action
+ * (an unwritable exe path, a conhost that rejects --headless on a
+ * pre-1809 build) exits instantly and "successfully". This turns that
+ * silent death into a spoken error with a remedy.
+ */
+function winAwaitDaemon(): void {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (attempt > 0) Bun.sleepSync(400);
+    const n = Number(run(powershellArgs(WIN_DAEMON_PS.count)).stdout.trim());
+    if (n > 0) return;
+  }
+  throw new Error(
+    "the daemon did not come up after start. Run `micke daemon` once to see its error, " +
+      "and check the micke task's Last Run Result in Task Scheduler (conhost --headless needs Windows 10 1809+).",
+  );
+}
+
 function requireSupportedPlatform(): void {
   if (!["linux", "darwin", "win32"].includes(process.platform)) {
     throw new Error(`no service-manager support for ${process.platform}`);
@@ -311,9 +349,10 @@ export function serviceInstall(): string {
   winStopDaemon(); // the old instance keeps running past a re-register
   const start = winStartDaemon(exe, backend);
   if (start.rc !== 0) fail(backend === "task" ? "Start-ScheduledTask" : "Start-Process (daemon)", start);
+  winAwaitDaemon(); // "started" ≠ running: say so instead of failing silently
   return backend === "task"
-    ? `scheduled task "${WIN_TASK}" registered (logon trigger, no elevation needed) and started`
-    : `HKCU Run entry registered (Task Scheduler was denied — likely domain policy) and daemon started`;
+    ? `scheduled task "${WIN_TASK}" registered (logon trigger, no elevation, no console window) and started`
+    : `HKCU Run entry registered (Task Scheduler was denied — likely domain policy; no console window) and daemon started`;
 }
 
 export function serviceUninstall(): string {
@@ -396,12 +435,20 @@ export function serviceRestart(): void {
     return;
   }
 
-  // win32: bounce = stop exactly the daemon, start it on whatever
-  // registration exists. The task path races the scheduler's IgnoreNew
-  // window; winStartDaemon retries through it.
+  // win32: bounce = refresh the registration, stop exactly the daemon,
+  // start it again, then confirm it actually came up. The refresh matters:
+  // `micke upgrade` restarts through the EXISTING task, and a task from an
+  // older micke may still point at pre-conhost actions — re-registering on
+  // every bounce self-heals those in place.
   const backend = winBackend();
   if (backend === null) throw new Error(NOT_INSTALLED); // re-checked: it may have vanished
+  const exe = compiledExe();
+  if (backend === "task") {
+    const reg = run(powershellArgs(WIN_TASK_PS.register), { MICKE_EXE: exe });
+    if (reg.rc !== 0) fail("Register-ScheduledTask (refresh)", reg);
+  }
   winStopDaemon();
-  const start = winStartDaemon(compiledExe(), backend);
+  const start = winStartDaemon(exe, backend);
   if (start.rc !== 0) fail("daemon start", start);
+  winAwaitDaemon(); // "started" ≠ running: say so instead of failing silently
 }
