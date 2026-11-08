@@ -51,10 +51,11 @@ if [ "$platform" = darwin ] && [ "$arch" = amd64 ]; then
 fi
 
 if [ "$tag" = latest ]; then
-  # /releases/latest 302s to <base>/tag/<tag>; with -L curl ends up on the tag
-  # page (must be 200 or -f fails) and -w prints the URL it landed on.
-  url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$base/releases/latest") \
-    || die "could not resolve the latest release from $base/releases/latest"
+  # $base/latest (on GitHub: .../<repo>/releases/latest — $base already ends in
+  # /releases) 302s to <base>/tag/<tag>; with -L curl ends up on the tag page
+  # (must be 200 or -f fails) and -w prints the URL it landed on.
+  url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$base/latest") \
+    || die "could not resolve the latest release from $base/latest"
   tag=${url%/}
   tag=${tag##*/}
   [ -n "$tag" ] || die "no tag in the followed URL: $url"

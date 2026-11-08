@@ -40,7 +40,8 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 
 $tag = $Version
 if ($Version -eq "latest") {
-    # /releases/latest answers 302 -> <base>/tag/<tag>. With
+    # $Base/latest (on GitHub: .../<repo>/releases/latest — $Base already ends
+    # in /releases) answers 302 -> <base>/tag/<tag>. With
     # -MaximumRedirection 0, PS 5.1 THROWS on the redirect, and the Location
     # header rides on the thrown WebException's response — read it there.
     # GitHub sends an absolute Location; a mirror may send a relative one, so
@@ -50,7 +51,7 @@ if ($Version -eq "latest") {
     $location = $null
     $notRedirect = $null
     try {
-        $resp = Invoke-WebRequest -Uri "$Base/releases/latest" -MaximumRedirection 0 -UseBasicParsing
+        $resp = Invoke-WebRequest -Uri "$Base/latest" -MaximumRedirection 0 -UseBasicParsing
         $notRedirect = "HTTP $($resp.StatusCode)" # 200 page, not a redirect
     } catch {
         $response = $_.Exception.Response
@@ -72,9 +73,9 @@ if ($Version -eq "latest") {
     }
     if (-not $location) {
         if ($notRedirect) {
-            throw "micke: $Base/releases/latest answered $notRedirect, expected a redirect — pin a version with -Version <tag>"
+            throw "micke: $Base/latest answered $notRedirect, expected a redirect — pin a version with -Version <tag>"
         }
-        throw "micke: could not read the latest tag from $Base/releases/latest — pin a version with -Version <tag>"
+        throw "micke: could not read the latest tag from $Base/latest — pin a version with -Version <tag>"
     }
     if ($location -notmatch "^https?://") {
         $origin = $Base.TrimEnd("/") -replace "/releases$", ""

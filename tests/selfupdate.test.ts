@@ -12,6 +12,10 @@
 // smoke-tests those), and the default restart would try to bounce whatever
 // registration THIS host really carries — including a developer's own
 // micke.service — which the tests must never do.
+//
+// The fake server's base ends in /releases, the DEFAULT's shape, so the URL
+// paths exercised here are the ones real GitHub sees (see the matching note
+// in tests/install-script.test.ts for why that shape is load-bearing).
 // Fast tier: no sandbox, no network, no service manager.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -71,7 +75,7 @@ describe.skipIf(process.platform === "win32")("performUpgrade (fake release serv
           // Trailing slash on purpose: the tag must be the LAST path segment.
           return new Response(null, { status: 302, headers: { Location: `${origin}/tag/${TAG}/` } });
         }
-        const m = path.match(/^\/download\/([^/]+)\/([^/]+)$/);
+        const m = path.match(/^\/releases\/download\/([^/]+)\/([^/]+)$/);
         if (!m) return new Response("not found", { status: 404 });
         if (m[2] === "SHA256SUMS") {
           if (sums === "missing") return new Response("not found", { status: 404 });
@@ -82,7 +86,7 @@ describe.skipIf(process.platform === "win32")("performUpgrade (fake release serv
         return new Response("not found", { status: 404 });
       },
     });
-    process.env.MICKE_RELEASE_BASE = `http://${server.hostname}:${server.port}`;
+    process.env.MICKE_RELEASE_BASE = `http://${server.hostname}:${server.port}/releases`;
   });
 
   afterAll(() => {

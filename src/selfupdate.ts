@@ -1,6 +1,6 @@
 // selfupdate — `micke upgrade`: replace the running micke binary in place.
 //
-// The upgrade story: resolve the latest release (a /releases/latest request
+// The upgrade story: resolve the latest release (a <base>/latest request
 // whose redirect Location names the tag), download the release's SHA256SUMS
 // and the new binary, verify the digest, swap the binary atomically, then
 // bounce the service so the daemon comes back on the new build. Re-running
@@ -51,26 +51,27 @@ export function assetNameFor(platform: string, arch: string, tag: string): strin
 }
 
 /**
- * The latest release tag, via GitHub's /releases/latest redirect: its
+ * The latest release tag, via the <base>/latest redirect (base ends in
+ * /releases, so on GitHub this is .../<repo>/releases/latest): its
  * Location header is <base>/tag/<tag>, so the last path segment IS the tag —
  * no second API round-trip, no JSON to parse.
  */
 export async function latestTag(): Promise<string> {
-  const url = `${base()}/releases/latest`;
+  const url = `${base()}/latest`;
   const res = await fetch(url, { redirect: "manual" });
   if (res.status === 404) {
     throw new Error(`no micke releases published yet (HTTP 404 from ${url})`);
   }
   if (res.status < 300 || res.status > 399) {
-    throw new Error(`expected /releases/latest to redirect, got HTTP ${res.status} (${url})`);
+    throw new Error(`expected the latest-release redirect, got HTTP ${res.status} (${url})`);
   }
   const location = res.headers.get("location");
   if (!location) {
-    throw new Error(`/releases/latest redirected (HTTP ${res.status}) without a Location header`);
+    throw new Error(`the latest-release redirect (HTTP ${res.status}) came without a Location header`);
   }
   const tag = location.replace(/\/+$/, "").split("/").filter(Boolean).pop();
   if (!tag) {
-    throw new Error(`no tag in the /releases/latest redirect (HTTP ${res.status}): ${location}`);
+    throw new Error(`no tag in the latest-release redirect (HTTP ${res.status}): ${location}`);
   }
   return tag;
 }

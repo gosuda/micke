@@ -11,6 +11,13 @@
 // Each run scrubs the environment with `env -i` (only HOME, PATH and the
 // MICKE_* overrides set): an installer that only works because it inherits
 // the developer's shell would be a landmine for the curl|sh user.
+//
+// The fake server's base ends in /releases — the DEFAULT's shape. v0.1.0
+// shipped with the installer requesting <base>/releases/latest (doubled) and
+// 404ing on real GitHub, because these tests stood the server up at a bare
+// origin: the override and the default disagreed on the convention and the
+// mismatch was invisible. The base now mirrors the default exactly, so any
+// future drift between the two URL constructions fails here first.
 // Fast tier: no sandbox, no network, no service manager.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -69,7 +76,7 @@ describe.skipIf(process.platform === "win32")("install.sh (fake release server)"
           return new Response(null, { status: 302, headers: { Location: `${origin}/tag/${latestTag}` } });
         }
         if (/^\/tag\/[^/]+$/.test(url.pathname)) return new Response("<html>release</html>");
-        const m = url.pathname.match(/^\/download\/([^/]+)\/([^/]+)$/);
+        const m = url.pathname.match(/^\/releases\/download\/([^/]+)\/([^/]+)$/);
         if (!m) return new Response("not found", { status: 404 });
         if (m[2] === "SHA256SUMS") return new Response(sumsFor(m[1]));
         if (/^micke-.*-linux-(amd64|arm64)$/.test(m[2])) return new Response(fakeBinary(m[1]));
@@ -105,7 +112,7 @@ describe.skipIf(process.platform === "win32")("install.sh (fake release server)"
         "env", "-i",
         `HOME=${work}`,
         "PATH=/usr/bin:/bin",
-        `MICKE_RELEASE_BASE=http://${server.hostname}:${server.port}`,
+        `MICKE_RELEASE_BASE=http://${server.hostname}:${server.port}/releases`,
         `MICKE_BIN_DIR=${binDir}`,
         `MICKE_FAKE_MARKER=${marker}`,
         "sh", SCRIPT,
