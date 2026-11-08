@@ -69,7 +69,6 @@ MICKE_E2E=1 bun test tests/     # E2E tier: real image
 ```
 
 Rules live in [AGENTS.md](AGENTS.md). Further docs:
-[docs/chromium-flags.md](docs/chromium-flags.md) (chromium flags + gotchas),
 [docs/manual-intervention.md](docs/manual-intervention.md) (human login over noVNC).
 
 ## Building the image (maintainers)
