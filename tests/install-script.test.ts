@@ -1,4 +1,5 @@
-// tests/install-script.test.ts — install.sh against a fake release server.
+// tests/install-script.test.ts — install.sh (and install.ps1) against a fake
+// release server.
 //
 // The installer is the first thing users run, so it gets the same treatment
 // as the updater: a local Bun.serve stands in for the GitHub release URL
@@ -21,7 +22,7 @@
 // Fast tier: no sandbox, no network, no service manager.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -171,4 +172,162 @@ describe.skipIf(process.platform === "win32")("install.sh (fake release server)"
     expect(stderr).toContain("sha256 mismatch");
     expect(existsSync(micke)).toBe(false); // die before install: no binary lands
   }, 15_000);
+});
+
+// ---- the PS 5.1 regression marker --------------------------------------------
+//
+// The v0.1.1 Windows defect (latest-resolution dead on real PowerShell 5.1)
+// came from reading the redirect off a thrown exception's response — a
+// mechanism whose 5.1 behavior cannot be booted in this suite at all. What
+// CAN be pinned is the mechanism's absence: resolving by FOLLOWING the
+// redirect and reading the final URL (ResponseUri on 5.1) is
+// engine-independent, and exception surgery coming back must fail here,
+// not at a user's prompt.
+describe("install.ps1 resolves latest without exception surgery", () => {
+  test("no redirect-refusal flag anywhere; the final-URL accessors are used", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "install.ps1"), "utf8");
+    // The parameter name is banned from the FILE, comments included: the
+    // refusal mechanism's failure mode only exists on real PS 5.1, which no
+    // suite here can boot, so its mere presence is the regression.
+    expect(src).not.toContain("MaximumRedirection");
+    expect(src).toContain("ResponseUri"); // PS 5.1's final-URL accessor
+  });
+});
+
+// ---- install.ps1 under a real pwsh engine ------------------------------------
+//
+// v0.1.1 shipped a Windows-only defect the sh suite could never see: the
+// latest-resolution read the redirect off a thrown exception's response,
+// and on real Windows PowerShell 5.1 the refused -MaximumRedirection 0
+// redirect carries NO response — the install died with a generic "could not
+// read the latest tag". That exact engine cannot be booted here, but running
+// the REAL script end to end under any pwsh on PATH keeps the whole class
+// honest (the resolution now follows the redirect and reads the final URL,
+// which is engine-independent). GitHub's ubuntu runners ship pwsh, so the
+// release gate exercises this suite; without pwsh it skips.
+//
+// The fake "exe" is a #!/bin/sh script named .exe: pwsh's `&` executes it on
+// unix, which is what proves `service install` ran. The run carries a fully
+// scrubbed env — PROCESSOR_ARCHITECTURE stands in for the Windows host's,
+// and HOME/LOCALAPPDATA point into the sandbox so nothing real is touched.
+const PWSH = Bun.which("pwsh");
+
+describe.skipIf(process.platform === "win32" || !PWSH)("install.ps1 (pwsh, fake release server)", () => {
+  const TAG = "v9.9.9";
+  let server: Bun.Server;
+  let noRedirect = false; // /releases/latest serves a plain 200 page instead
+  let tampered = false;
+  const workdirs: string[] = [];
+
+  /** The served "exe": a sh script whose version IS its tag. */
+  const fakeExe = (tag: string): string =>
+    `#!/bin/sh
+case "$1" in
+  version) echo "${tag}" ;;
+  service)
+    case "$2" in
+      install) echo ok > "\${MICKE_FAKE_MARKER:?}" ;;
+      status) echo "fake-status" ;;
+    esac
+    ;;
+esac
+`;
+
+  const sha = (bytes: string): string => {
+    const h = new Bun.CryptoHasher("sha256");
+    h.update(bytes);
+    return h.digest("hex");
+  };
+
+  const sumsFor = (tag: string): string => {
+    const hex = tampered ? "0".repeat(64) : sha(fakeExe(tag));
+    return `micke-${tag}-linux-amd64\n${hex}  micke-${tag}-windows-amd64.exe\n`;
+  };
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        const origin = url.origin;
+        if (url.pathname === "/releases/latest") {
+          if (noRedirect) return new Response("<html>latest page</html>");
+          return new Response(null, { status: 302, headers: { Location: `${origin}/tag/${TAG}` } });
+        }
+        if (/^\/tag\/[^/]+$/.test(url.pathname)) return new Response("<html>release</html>");
+        const m = url.pathname.match(/^\/releases\/download\/([^/]+)\/([^/]+)$/);
+        if (!m) return new Response("not found", { status: 404 });
+        if (m[2] === "SHA256SUMS") return new Response(sumsFor(m[1]));
+        if (m[2] === `micke-${TAG}-windows-amd64.exe`) return new Response(fakeExe(TAG));
+        return new Response("not found", { status: 404 });
+      },
+    });
+  });
+
+  afterAll(() => {
+    server?.stop(true);
+    for (const w of workdirs) rmSync(w, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    noRedirect = false;
+    tampered = false;
+  });
+
+  /** One install.ps1 run in a scrubbed env (the pwsh analogue of env -i). */
+  const runInstaller = async () => {
+    const work = mkdtempSync(join(tmpdir(), "micke-install-ps1-"));
+    workdirs.push(work);
+    const marker = join(work, "marker");
+    const proc = Bun.spawn(
+      [
+        PWSH!, "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", join(import.meta.dir, "..", "install.ps1"),
+      ],
+      {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          HOME: work,
+          PATH: "/usr/bin:/bin",
+          MICKE_RELEASE_BASE: `http://${server.hostname}:${server.port}/releases`,
+          MICKE_FAKE_MARKER: marker,
+          LOCALAPPDATA: work,
+          PROCESSOR_ARCHITECTURE: "AMD64", // what the arch switch keys on
+        },
+      },
+    );
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exe = join(work, "micke", "micke.exe");
+    return { rc: await proc.exited, stdout, stderr, exe, marker };
+  };
+
+  test("resolves latest via the redirect, verifies, installs and runs service install", async () => {
+    const { rc, stdout, exe, marker } = await runInstaller();
+    expect(rc).toBe(0);
+    expect(stdout).toContain(`micke: latest release is ${TAG}`);
+    expect(existsSync(exe)).toBe(true);
+    expect(readFileSync(exe, "utf8")).toBe(fakeExe(TAG)); // the served bytes, verified
+    expect(existsSync(marker)).toBe(true); // `& $Exe service install` ran
+  }, 60_000);
+
+  test("a /latest that does not redirect aborts with the pin remedy, nothing installed", async () => {
+    noRedirect = true;
+    const { rc, stderr, exe } = await runInstaller();
+    expect(rc).not.toBe(0);
+    expect(stderr).toContain("did not redirect");
+    expect(existsSync(exe)).toBe(false);
+  }, 60_000);
+
+  test("a tampered SHA256SUMS aborts with nothing installed", async () => {
+    tampered = true;
+    const { rc, stderr, exe } = await runInstaller();
+    expect(rc).not.toBe(0);
+    expect(stderr).toContain("sha256 mismatch");
+    expect(existsSync(exe)).toBe(false);
+  }, 60_000);
 });

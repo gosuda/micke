@@ -40,49 +40,37 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 
 $tag = $Version
 if ($Version -eq "latest") {
-    # $Base/latest (on GitHub: .../<repo>/releases/latest — $Base already ends
-    # in /releases) answers 302 -> <base>/tag/<tag>. With
-    # -MaximumRedirection 0, PS 5.1 THROWS on the redirect, and the Location
-    # header rides on the thrown WebException's response — read it there.
-    # GitHub sends an absolute Location; a mirror may send a relative one, so
-    # rebase relative values against $Base. Fallback if a mirror serves the
-    # URL as a plain 200 page: no tag can be discovered — this script fails
-    # and the user pins one with -Version <tag>.
-    $location = $null
-    $notRedirect = $null
+    # Resolve the way install.sh does: FOLLOW the redirect and read the FINAL
+    # URL — its last path segment is the tag. Deliberately no
+    # zero-redirect-refusal trick with its thrown-exception surgery: on real
+    # Windows PowerShell 5.1 the refused redirect surfaces as a WebException
+    # that carries NO response, so there is no Location to read and the
+    # install died with nothing but a generic message (the v0.1.1 Windows
+    # report). Following the redirect needs no version-specific handling:
+    # PS 5.1 exposes the final URL as BaseResponse.ResponseUri, PS 7 as
+    # BaseResponse.RequestMessage.RequestUri. (The suite pins the refusal
+    # flag's absence — that parameter never comes back into this file.)
     try {
-        $resp = Invoke-WebRequest -Uri "$Base/latest" -MaximumRedirection 0 -UseBasicParsing
-        $notRedirect = "HTTP $($resp.StatusCode)" # 200 page, not a redirect
+        $resp = Invoke-WebRequest -Uri "$Base/latest" -UseBasicParsing
     } catch {
-        $response = $_.Exception.Response
-        if ($response -and $response.Headers) {
-            # PS 5.1 (.NET Framework): the header collection is a plain
-            # WebHeaderCollection. PS 7 exposes typed
-            # HttpResponseMessageHeaders, where the string indexer THROWS —
-            # which used to kill this catch block and made the fallback
-            # below unreachable. GetValues(name) works on both. It THROWS
-            # (not null) when the header is absent — e.g. a plain 404 —
-            # so guard it and let the friendly throw below handle that.
-            try {
-                $location = [string]($response.Headers.GetValues("Location") | Select-Object -First 1)
-            } catch { $location = $null }
-            if (-not $location -and $response.Headers.Location) {
-                $location = [string]$response.Headers.Location
-            }
-        }
+        throw "micke: could not resolve the latest release from $Base/latest ($($_.Exception.Message)) — pin a version with -Version <tag>"
     }
-    if (-not $location) {
-        if ($notRedirect) {
-            throw "micke: $Base/latest answered $notRedirect, expected a redirect — pin a version with -Version <tag>"
-        }
-        throw "micke: could not read the latest tag from $Base/latest — pin a version with -Version <tag>"
+    $finalUri = $null
+    if ($resp.BaseResponse.ResponseUri) {
+        $finalUri = [string]$resp.BaseResponse.ResponseUri                        # PS 5.1
+    } elseif ($resp.BaseResponse.RequestMessage -and $resp.BaseResponse.RequestMessage.RequestUri) {
+        $finalUri = [string]$resp.BaseResponse.RequestMessage.RequestUri          # PS 7
     }
-    if ($location -notmatch "^https?://") {
-        $origin = $Base.TrimEnd("/") -replace "/releases$", ""
-        $location = "$origin/" + $location.TrimStart("/")
+    if (-not $finalUri) {
+        throw "micke: could not read the final URL after following $Base/latest — pin a version with -Version <tag>"
     }
-    $tag = ($location.TrimEnd("/")) -split "/" | Select-Object -Last 1
-    if (-not $tag) { throw "micke: no tag in redirect location '$location'" }
+    $tag = ($finalUri.TrimEnd("/")) -split "/" | Select-Object -Last 1
+    if (-not $tag -or $tag -eq "latest") {
+        # A mirror that serves /latest as a plain page (no redirect): the
+        # "tag" would be the literal segment "latest" — name it, don't
+        # download a micke-latest-* asset that 404s later.
+        throw "micke: $Base/latest did not redirect to a tag page (landed on '$finalUri') — pin a version with -Version <tag>"
+    }
     Write-Host "micke: latest release is $tag"
 }
 
@@ -132,6 +120,15 @@ try {
     throw $moveError
 }
 
+# A non-Windows pwsh (the test suite runs this script under one) needs the
+# exec bit Invoke-WebRequest -OutFile never sets: without it `& $Exe` below
+# does not fail — it quietly hands the file to the desktop's document
+# opener. On Windows $env:OS is Windows_NT and this is skipped entirely.
+if ($env:OS -ne "Windows_NT" -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
+    & chmod 755 $Exe
+    if ($LASTEXITCODE -ne 0) { throw "micke: chmod 755 failed on $Exe (exit $LASTEXITCODE)" }
+}
+
 # Add $Dir to the USER Path when missing (exact-segment check, idempotent).
 # The value is read expanded and written back expanded: the effective Path is
 # preserved verbatim even though %VARIABLE% references become inline. Never
@@ -144,12 +141,19 @@ if ($userPath) {
     }
 }
 if (-not $onPath) {
-    if ($userPath) {
-        [Environment]::SetEnvironmentVariable("Path", "$userPath;$Dir", "User")
-    } else {
-        [Environment]::SetEnvironmentVariable("Path", $Dir, "User")
+    # Best-effort on purpose: a locked-down profile (or a non-Windows pwsh
+    # running the script) must not abort an install whose binary already
+    # landed — the user can add one PATH segment by hand.
+    try {
+        if ($userPath) {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$Dir", "User")
+        } else {
+            [Environment]::SetEnvironmentVariable("Path", $Dir, "User")
+        }
+        Write-Host "micke: added $Dir to your user PATH (open a new terminal for it)"
+    } catch {
+        Write-Warning "micke: could not update the user PATH ($($_.Exception.Message)) — add $Dir yourself to run micke from anywhere"
     }
-    Write-Host "micke: added $Dir to your user PATH (open a new terminal for it)"
 }
 
 # Register + start; re-running over an existing task re-creates and starts
