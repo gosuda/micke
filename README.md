@@ -138,10 +138,8 @@ The download is sha256-verified against the release `SHA256SUMS` and
 swapped in atomically; a registered service is bounced (sandboxes keep
 running — the new daemon adopts them), otherwise the one-line result says
 to start with `micke service install`. On Windows the old binary steps
-aside as `micke.old.exe` — safe to delete. Trust model: the checksum
-travels with the release, so it protects against corruption and partial
-downloads, not a compromised publisher — strict hosts pin versions and
-verify signatures themselves.
+aside as `micke.old.exe` — safe to delete. Same trust model as the rungv
+download above.
 
 ## Environment
 
@@ -201,9 +199,8 @@ Underneath, the primitive is unchanged — a pushed `v*` tag: manual
 refs/tags/vX.Y.Z` does the same thing. CI runs the fast test tier,
 cross-compiles the five release assets + `SHA256SUMS` (linux
 amd64/arm64, darwin arm64, windows amd64/arm64) and publishes the
-GitHub release. The asset names are the updater's contract —
-`scripts/build.ts` asserts them against `assetNameFor` in
-`src/selfupdate.ts` and fails the build on drift.
+GitHub release. Asset names are the updater's contract — its home is
+`scripts/build.ts`, which fails the build on drift.
 Local: `bun run build` (dev-labeled binaries in `dist/`).
 
 ## Building the image (maintainers)

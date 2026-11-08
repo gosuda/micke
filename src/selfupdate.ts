@@ -7,9 +7,8 @@
 // with an explicit tag — even the current one — is the repair path for a
 // broken install, so same-tag reinstall is allowed.
 //
-// Trust model: the checksum travels with the release (same origin), so this
-// guards against corruption and partial downloads, NOT against a compromised
-// publisher — the same deal as the rungv self-provisioning in rungvinstall.ts.
+// Trust model: see release.ts — the checksum guards corruption, not a
+// compromised publisher.
 //
 // Swap mechanics: on unix the candidate lands in the SAME directory as the
 // running binary and is renamed over it — a same-dir rename is atomic and
@@ -38,9 +37,8 @@ function base(): string {
 /**
  * Release asset for a platform, or null when micke publishes none. Assets are
  * RAW single-file binaries — the whole app is one executable, no archive.
- * NB: no darwin-amd64, the same exclusion as the rungv asset map in
- * rungvinstall.ts: gvx publishes no darwin-amd64 release for micke to run
- * underneath it.
+ * NB: no darwin-amd64 — the gvx-driven exclusion; rationale in
+ * rungvinstall.ts.
  */
 export function assetNameFor(platform: string, arch: string, tag: string): string | null {
   const p = platform === "win32" ? "windows" : platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : null;

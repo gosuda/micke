@@ -29,10 +29,8 @@
 #
 # Modeled on agent-desktop's own container smoke test
 # (scripts/linux-container-smoke.sh in vercel-labs/agent-desktop), which
-# boots openbox. micke diverges from that reference: the smoke test only
-# needs any WM, while micke runs a minimal XFCE session (GTK3 → native
-# AT-SPI, xfwm4 for EWMH window ops, xfce4-notifyd for notifications,
-# xfce4-terminal + thunar for human takeover over noVNC).
+# boots openbox. micke runs a minimal XFCE session instead — the why is
+# the session stack's comment in image/Dockerfile.
 set -euo pipefail
 
 # The runtime dir must exist before dbus-run-session starts the bus.

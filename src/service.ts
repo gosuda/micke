@@ -14,9 +14,8 @@
 // functions of their parameters — tests assert their content. The actions
 // shell out through a local spawnSync `run()` helper, throw a plain Error
 // carrying the remedy when a must-succeed command fails, and return a
-// human-readable summary for the CLI to print. Re-running install is always
-// safe: it overwrites the registration and bounces the daemon into the
-// (possibly newer) binary — install doubles as the post-upgrade restart.
+// human-readable summary for the CLI to print. Re-running install is
+// always safe: it overwrites the registration.
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";

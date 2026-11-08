@@ -4,11 +4,9 @@
 # scripts/build.ts cross-compiles all five assets (linux amd64/arm64, darwin
 # arm64, windows amd64/arm64 — no darwin-amd64, matching the rungv asset map)
 # on this one runner and writes SHA256SUMS, then `gh release create dist/*`
-# publishes binaries + sums together. The asset names are the updater's
-# contract (src/selfupdate.ts assetNameFor — `micke upgrade` and the
-# installers download by these exact names); build.ts fails the run on any
-# name drift or compile failure, so a red build here can never ship a
-# release with a missing or misnamed asset.
+# publishes binaries + sums together. Asset names are the updater's
+# contract, asserted by scripts/build.ts — a red build here can never ship
+# a misnamed or missing asset.
 #
 # The fast test tier runs BEFORE the build: a broken tree must not release,
 # and the fast tier is exactly the gate that runs locally (bun test tests/,

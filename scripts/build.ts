@@ -42,8 +42,8 @@ const TARGETS: Target[] = [
   { bun: "bun-linux-x64", platform: "linux", arch: "amd64", nodePlatform: "linux" },
   { bun: "bun-linux-arm64", platform: "linux", arch: "arm64", nodePlatform: "linux" },
   { bun: "bun-darwin-arm64", platform: "darwin", arch: "arm64", nodePlatform: "darwin" },
-  // No darwin-amd64 row: gvx publishes no darwin-amd64 release for micke to
-  // run underneath it, so micke doesn't either (assetNameFor returns null).
+  // No darwin-amd64 row — the gvx-driven exclusion, mirrored by
+  // assetNameFor (rationale: src/rungvinstall.ts).
   { bun: "bun-windows-x64", platform: "windows", arch: "amd64", nodePlatform: "win32" },
   { bun: "bun-windows-arm64", platform: "windows", arch: "arm64", nodePlatform: "win32" },
 ];

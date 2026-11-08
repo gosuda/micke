@@ -9,11 +9,10 @@
 // The version is PINNED in gvxio (RUNGV_DEFAULT_VERSION), never "latest": gvx
 // releases move daily and its on-disk formats have broken across tags before.
 //
-// Trust note: the checksum travels with the release (same origin), so this
-// guards against corruption and partial downloads, not against a compromised
-// publisher. Environments that care install rungv themselves — an explicit
-// MICKE_RUNGV or a PATH binary always wins, and MICKE_RUNGV_AUTO_DOWNLOAD=0
-// turns this path off entirely.
+// Trust model: see release.ts — the checksum guards corruption, not a
+// compromised publisher. Environments that care install rungv themselves —
+// an explicit MICKE_RUNGV or a PATH binary always wins, and
+// MICKE_RUNGV_AUTO_DOWNLOAD=0 turns this path off entirely.
 //
 // Every failure cleans up its temp files and throws a plain Error; the
 // supervisor wraps it into MickeError("RUNGV_INSTALL_FAILED", …) with the
@@ -33,7 +32,10 @@ function releaseBase(): string {
 /**
  * Release asset for a platform, or null when gvx publishes none. Archive
  * layout is `rungv-<tag>-<platform>/rungv(.exe)` plus license files.
- * NB: gvx ships no darwin-amd64 archive (Apple Silicon only).
+ * NB: gvx ships no darwin-amd64 archive (Apple Silicon only) — and micke
+ * mirrors the exclusion for its own binaries (selfupdate.ts,
+ * scripts/build.ts): there is no gvx release for a darwin-amd64 micke to
+ * run underneath, so micke publishes none either.
  */
 export function assetNameFor(platform: string, arch: string, tag: string): string | null {
   const p = platform === "win32" ? "windows" : platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : null;
