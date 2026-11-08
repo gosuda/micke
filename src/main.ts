@@ -3,13 +3,14 @@
 // a security property).
 //
 // Run: bun run src/main.ts  (or: bun run start)
-// Routes: POST /mcp (stateless MCP), GET / (dashboard), anything else 404.
-// Diagnostics go to stderr; stdout stays clean.
+// Routes: POST /mcp (stateless MCP), /api/* (JSON API), GET / (dashboard),
+// anything else 404. Diagnostics go to stderr; stdout stays clean.
 
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { MickeError, Supervisor } from "./supervisor.js";
 import { dashboardResponse } from "./dashboard.js";
 import { createMcpServer } from "./mcp.js";
+import { handleApi } from "./api.js";
 
 const sup = new Supervisor();
 try {
@@ -59,6 +60,11 @@ async function route(req: Request): Promise<Response> {
     await mcp.connect(transport);
     return transport.handleRequest(req);
   }
+  // /api/* rides the SAME Origin gate above — api.ts never re-checks and
+  // must never be reachable without it. Null = not an /api path: fall
+  // through to dashboard/404.
+  const apiRes = await handleApi(req, sup);
+  if (apiRes) return apiRes;
   if (path === "/") return dashboardResponse(() => sup.listSessions());
   return new Response("not found\n", { status: 404 });
 }
@@ -68,7 +74,19 @@ const server = (() => {
     // reusePort: false is load-bearing: Bun's Linux default (true, via
     // SO_REUSEPORT) would let a second daemon "bind" the same port and
     // silently share traffic with the first — PORT_HELD must be detectable.
-    return Bun.serve({ hostname: "127.0.0.1", port, reusePort: false, development: false, fetch: route });
+    // idleTimeout: 255 s (Bun's max) because a web POST /api/sessions can
+    // hold the request open through image pull + boot — minutes on a first
+    // run — and a client disconnect does NOT cancel the server-side boot
+    // (the session still appears on the next poll). The default (~10 s)
+    // would sever exactly those long creates while the sandbox keeps booting.
+    return Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      reusePort: false,
+      development: false,
+      idleTimeout: 255,
+      fetch: route,
+    });
   } catch (err) {
     // The port IS the product (unlike the old optional dashboard): fatal.
     console.error(`micke: fatal: ${JSON.stringify({

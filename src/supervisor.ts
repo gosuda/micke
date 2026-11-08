@@ -80,6 +80,16 @@ export class Supervisor {
     this.adoptSessions();
   }
 
+  /**
+   * Read-only peek at the state dir this supervisor owns, so audit/web
+   * layers append under the exact same path without duplicating (or
+   * forking) the state-dir logic. Read-only by intent: callers may append
+   * (audit.log), never recreate or move it.
+   */
+  getStateDir(): string {
+    return this.stateDir;
+  }
+
   // ---- lifecycle ----------------------------------------------------------
   //
   // create = validate cheaply, then run the whole pull+boot phase under ONE
