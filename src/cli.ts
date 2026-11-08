@@ -9,6 +9,7 @@
 
 import { MICKE_VERSION } from "./version.js";
 import { serviceInstall, serviceRestart, serviceStatus, serviceUninstall } from "./service.js";
+import { performUpgrade } from "./selfupdate.js";
 
 const USAGE = `micke ${MICKE_VERSION} — gvx sandbox desktops, managed over MCP
 
@@ -20,7 +21,7 @@ Commands:
   service uninstall   stop micke and remove the service registration
   service status      report whether the registered micke daemon is running
   service restart     bounce the registered daemon (e.g. after an upgrade)
-  upgrade             replace this micke binary with the latest release
+  upgrade [tag]       replace this micke binary with the latest release (a tag pins one, e.g. for repair)
   version             print the micke version
   help                show this help
 
@@ -66,9 +67,19 @@ async function main(argv: string[]): Promise<number> {
           process.stderr.write(USAGE);
           return 1;
       }
-    case "upgrade":
-      // Self-update ships in a later unit; until then, an honest failure.
-      throw new Error("upgrade is not implemented yet");
+    case "upgrade": {
+      // First non-flag arg optionally pins the tag (the repair path); with
+      // none, upgrade targets whatever /releases/latest redirects to.
+      const tag = argv.slice(1).find((a) => !a.startsWith("-"));
+      const r = await performUpgrade(tag ? { tag } : {});
+      // Exactly one line on success: stdout stays clean for installers.
+      console.log(
+        r.restarted
+          ? `micke: ${r.from} → ${r.to} at ${r.path} (service restarted; sessions survive — the daemon adopts them)`
+          : `micke: ${r.from} → ${r.to} at ${r.path} (not registered as a service — start it with: micke service install)`,
+      );
+      return 0;
+    }
     default:
       process.stderr.write(USAGE);
       return 1;
