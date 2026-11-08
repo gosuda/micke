@@ -41,3 +41,27 @@ wire protocol and supervisor lifecycle; E2E covers only the real-image residue.
 - E2E tests live in `tests/e2e/`, are gated with `describe.skipIf(!E2E)`, and
   carry an explicit per-test timeout. `tests/stateless-shell.test.ts` stays at
   its original path (also gated) so one-file path selection keeps working.
+
+## Commit convention
+
+Subjects are `type(scope)!: subject` — scope and `!` optional, the subject a
+lowercase imperative clause with no trailing period, exactly as the history
+already reads: `feat(rungv): self-provision the pinned gvx release when none
+is installed`, `fix(rfb): read SecurityResult after None in RFB 3.8 —
+un-break password-less shots`, `docs: align with the stock surface`.
+
+Not a style preference — the subject is load-bearing data: `bun run release`
+derives the next version from the subjects since the nearest tag and reads
+subjects ONLY (`git log --format=%s`; the policy is `nextTag` in
+`scripts/release.ts`, the flow is README's Releasing section). So:
+
+- `feat`, `fix`, `perf`, `refactor` are the bump types: with `!` → major;
+  `feat` plain → minor; the other three plain → patch.
+- Every other type — `docs`, `test`, `chore`, `build`, `ci`, or none at all —
+  bumps patch. A `feat` mistyped as `chore` silently ships as a patch.
+- A breaking change must carry `!` in the subject (`feat!:`, `fix(scope)!:`)
+  — a "BREAKING CHANGE:" footer in the body is invisible to the script.
+
+When unsure between types, pick the higher-visibility one (`fix` over
+`chore`, `feat` over `fix`): an over-bumped version is recoverable, a
+feature shipped as a patch is not.

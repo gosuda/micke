@@ -2,17 +2,17 @@
 //
 // scripts/release.ts drives git, the network, gh and worktrees — none of
 // that belongs in the fast tier (it would mutate the repo and cut real
-// releases). The script keeps its decision policy in two pure exports
-// (nextTag, validTag) exactly so this suite can pin the bump rules and the
-// tag grammar hermetically; the imperative flow is the maintainer's manual
-// verification (--dry-run), not a test.
+// releases). The script keeps its decision policy in pure exports
+// (nextTag, validTag, classifySubjects) exactly so this suite can pin the
+// bump rules and the tag grammar hermetically; the imperative flow is the
+// maintainer's manual verification (--dry-run), not a test.
 //
 // Importing the module is side-effect free (the flow runs only under
 // import.meta.main), so this file can import it directly.
 // Fast tier: no network, no gh, no worktrees, no git.
 
 import { describe, expect, test } from "bun:test";
-import { nextTag, validTag } from "../scripts/release.js";
+import { classifySubjects, nextTag, validTag } from "../scripts/release.js";
 
 describe("nextTag (release script)", () => {
   test("no last tag → seeds package.json's version verbatim, even over breaking subjects", () => {
@@ -35,6 +35,26 @@ describe("nextTag (release script)", () => {
 
   test("scoped feat feat(api): … → minor (the scope parens must not break the match)", () => {
     expect(nextTag(["feat(api): new endpoint"], "v0.1.0", "0.1.0")).toBe("v0.2.0");
+  });
+});
+
+describe("classifySubjects (release script)", () => {
+  test("unconventional = no known type at all; conventional-but-patch types are not flagged", () => {
+    const r = classifySubjects(["wip stuff", "revert last commit", "docs: readme", "chore(ci): bump deps"]);
+    expect(r.unconventional).toEqual(["wip stuff", "revert last commit"]);
+  });
+
+  test("`!` is honored only on the four bump types — docs!: is conventional, non-breaking (patch)", () => {
+    const r = classifySubjects(["docs!: rewrite everything", "chore!: restructure"]);
+    expect(r.breaking).toBe(false);
+    expect(r.unconventional).toEqual([]);
+  });
+
+  test("`!` on fix/perf/refactor is breaking; only feat (with or without `!`) sets feature", () => {
+    const r = classifySubjects(["fix(a)!: payload", "perf!: faster", "refactor!: leaner", "feat: new"]);
+    expect(r.breaking).toBe(true);
+    expect(r.feature).toBe(true);
+    expect(classifySubjects(["fix: plain"]).feature).toBe(false);
   });
 });
 

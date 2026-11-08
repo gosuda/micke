@@ -189,7 +189,9 @@ The hash defaults to HEAD and must already be on origin/main (the script
 never pushes main). The tag, when not given, is derived from the
 conventional-commit subjects since the nearest `v*` tag: any
 `feat!`/`fix!`/`perf!`/`refactor!` subject → major, `feat` → minor, else
-patch — and the first release ever seeds package.json's version. The
+patch — and the first release ever seeds package.json's version. The bump
+follows commit subjects alone; the convention behind them (which types
+bump, where the `!` goes) is in [AGENTS.md](AGENTS.md). The
 script reruns the fast test tier in a detached worktree at the exact
 hash, pushes the annotated tag, and watches the CI run through to the
 release URL.

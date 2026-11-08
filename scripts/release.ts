@@ -43,6 +43,12 @@ const die = (msg: string): never => {
 
 const BREAKING = /^(feat|fix|perf|refactor)(\([^)]*\))?!:/;
 const FEATURE = /^feat(\([^)]*\))?:/;
+// Deliberately WIDER than BREAKING: this is the display-time known-type
+// list. A subject in conventional shape but of a non-bumping type
+// (`docs:`, `ci(image):`) is an ordinary patch, not a suspect — only a
+// subject with no recognizable type at all gets called out as
+// unconventional.
+const KNOWN_TYPE = /^(feat|fix|docs|test|chore|build|ci|perf|refactor|style)(\([^)]*\))?!?:/;
 
 /**
  * Strict vX.Y.Z — no prerelease/build suffixes — and nothing else.
@@ -70,16 +76,56 @@ export const nextTag = (subjects: string[], lastTag: string | null, seedVersion:
   const m = lastTag.match(/^v(\d+)\.(\d+)\.(\d+)$/);
   if (!m) throw new Error(`cannot parse last tag "${lastTag}" as vX.Y.Z`);
   const [major, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  if (subjects.some((s) => BREAKING.test(s))) return `v${major + 1}.0.0`;
-  if (subjects.some((s) => FEATURE.test(s))) return `v${major}.${minor + 1}.0`;
+  const { breaking, feature } = classifySubjects(subjects);
+  if (breaking) return `v${major + 1}.0.0`;
+  if (feature) return `v${major}.${minor + 1}.0`;
   return `v${major}.${minor}.${patch + 1}`;
+};
+
+/**
+ * One classification pass over the subjects since the last tag — the
+ * single source of truth for the bump policy (nextTag), the reason
+ * sentence, and the step-[4] visibility line, so what is shown is what
+ * fired; the display and the policy cannot drift apart.
+ *
+ * `unconventional` = subjects matching no known type at all. They count
+ * as patch-level by design — and they are exactly where a `feat` mistyped
+ * as something unrecognizable hides, which is why they get named.
+ */
+export const classifySubjects = (subjects: string[]): { breaking: boolean; feature: boolean; unconventional: string[] } => {
+  const r = { breaking: false, feature: false, unconventional: [] as string[] };
+  for (const s of subjects) {
+    if (BREAKING.test(s)) r.breaking = true;
+    if (FEATURE.test(s)) r.feature = true;
+    if (!KNOWN_TYPE.test(s)) r.unconventional.push(s);
+  }
+  return r;
 };
 
 /** Human sentence for the dry-run plan: which bump rule fired, and why. */
 const bumpReason = (subjects: string[]): string => {
-  if (subjects.some((s) => BREAKING.test(s))) return "a breaking `!:` subject since the last tag";
-  if (subjects.some((s) => FEATURE.test(s))) return "feat subject(s) since the last tag";
+  const { breaking, feature } = classifySubjects(subjects);
+  if (breaking) return "a breaking `!:` subject since the last tag";
+  if (feature) return "feat subject(s) since the last tag";
   return "only patch-level subjects since the last tag";
+};
+
+/**
+ * The derivation's evidence on one line: how many subjects were
+ * considered, and which fall outside the conventional grammar (those are
+ * patch by design). Truncated to stay readable: ~60 chars per subject,
+ * at most five named, then "and N more".
+ */
+const subjectLine = (subjects: string[], lastTag: string): string => {
+  const { unconventional } = classifySubjects(subjects);
+  const clip = (s: string): string => (s.length > 60 ? `${s.slice(0, 57)}…` : s);
+  const shown = unconventional.slice(0, 5).map((s) => `"${clip(s)}"`);
+  const more = unconventional.length > shown.length ? ` and ${unconventional.length - shown.length} more` : "";
+  const tail =
+    unconventional.length === 0
+      ? "none unconventional"
+      : `unconventional (patch by design): ${shown.join(", ")}${more}`;
+  return `${subjects.length} subject(s) since ${lastTag}; ${tail}`;
 };
 
 // ---- small runners -----------------------------------------------------------
@@ -174,6 +220,7 @@ const main = async (): Promise<void> => {
 
   let tag: string;
   let why: string;
+  let subjectNote: string | null = null; // set only on the derived-from-subjects path
   if (tagArg !== null) {
     if (!validTag(tagArg)) die(`[4] tag "${tagArg}" is not strict vX.Y.Z (no prerelease/build suffixes) — pass e.g. v0.2.0, or omit the tag to derive it`);
     tag = tagArg;
@@ -185,8 +232,13 @@ const main = async (): Promise<void> => {
     const subjects = gitOut(["log", "--format=%s", `${lastTag}..${sha}`]).out.split("\n").filter((s) => s !== "");
     tag = nextTag(subjects, lastTag, pkg.version);
     why = `${lastTag} → ${tag} — ${bumpReason(subjects)}`;
+    subjectNote = subjectLine(subjects, lastTag);
   }
   console.log(`micke: [4] tag ${tag} (${why})`);
+  // The derivation's inputs, shown on every path from here (dry-run and
+  // real run alike): a mis-typed `feat` reads as "only patch-level"
+  // otherwise, with nothing pointing at the subject that hid it.
+  if (subjectNote !== null) console.log(`micke: [4]   ${subjectNote}`);
 
   // [5] The tag must be new everywhere. A re-release over an existing tag
   // desyncs published assets from SHA256SUMS, so the remedy is the explicit
