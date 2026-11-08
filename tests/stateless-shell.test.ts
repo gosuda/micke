@@ -1,4 +1,4 @@
-// tests/e2e/stateless-shell.test.ts — the session_shell contract on a real
+// tests/stateless-shell.test.ts — the session_shell contract on a real
 // image: ONE fresh bash per call. Boots a single session and runs every
 // stateless assertion against it, in sequence, so the E2E suite does not pay
 // for more sandboxes.

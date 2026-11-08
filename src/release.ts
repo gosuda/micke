@@ -1,7 +1,7 @@
 // release — shared GitHub-release download plumbing.
 //
 // WHY this module exists: both the rungv self-provisioning (rungvinstall.ts)
-// and micke's own self-update (selfupdate, a later unit) download artifacts
+// and micke's own self-update (selfupdate.ts) download artifacts
 // from GitHub releases and must verify them the same way, so the helpers live
 // here once instead of drifting in two places.
 //

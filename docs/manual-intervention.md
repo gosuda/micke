@@ -44,7 +44,7 @@ call — and hand the desk back.
 The human and the agent share **one X display and one focused window**. There
 is no arbitration: if the agent types or clicks while the human's hand is on
 the keyboard, inputs interleave — keystrokes go to whatever has focus,
-clicks land wherever the cursor is. This is unsolved by design in M-min.
+clicks land wherever the cursor is. This is unsolved by design.
 **Intervene only while the agent is paused** (that is why the pause
 announcement in step 1 names the session), and let the agent verify state
 from receipts when it resumes rather than assuming nothing moved. "Paused"

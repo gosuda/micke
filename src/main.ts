@@ -34,7 +34,7 @@ export async function main(): Promise<void> {
   // on a kernel-picked port, and a same-origin browser fetch sends that one.
   let boundPort = port;
 
-  // The router IS the middleware (design §2d): the loopback bind plus this
+  // The router IS the middleware: the loopback bind plus this
   // Origin check are the whole DNS-rebinding defense. Browsers always send
   // Origin on cross-origin POSTs; MCP clients send none.
   function originAllowed(req: Request): boolean {
