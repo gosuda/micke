@@ -15,7 +15,8 @@
 // running binary and is renamed over it — a same-dir rename is atomic and
 // never crosses a filesystem, so no observer sees a half-written micke. On
 // Windows a running exe may be renamed but not overwritten, so the old
-// binary dances aside first: exe → exe.old, then candidate → exe.
+// binary dances aside first: micke.exe → micke.old.exe, then candidate →
+// micke.exe.
 //
 // The post-swap service bounce is best-effort and lossless: rungv child
 // sandboxes keep running through it and the next daemon adopts them from
@@ -135,9 +136,18 @@ export async function performUpgrade(
 
     // 4. Swap in (see the swap-mechanics note in the header).
     if (process.platform === "win32") {
-      try { rmSync(`${current}.old`, { force: true }); } catch { /* stale .old from a prior upgrade */ }
-      try { renameSync(current, `${current}.old`); } catch { /* best-effort */ }
-      renameSync(candidate, current);
+      const backup = join(dirname(current), `${basename(current, ".exe")}.old.exe`); // micke.old.exe — the same name install.ps1 manages
+      try { rmSync(backup, { force: true }); } catch { /* stale backup from a prior upgrade */ }
+      try { renameSync(current, backup); } catch { /* best-effort */ }
+      try {
+        renameSync(candidate, current);
+      } catch (err) {
+        // Roll back: without micke.exe there is nothing to run — and
+        // `micke upgrade` is the documented repair path — so restore the
+        // old binary before rethrowing.
+        try { renameSync(backup, current); } catch { /* best-effort */ }
+        throw err;
+      }
     } else {
       renameSync(candidate, current); // same-dir rename: atomic replace
     }

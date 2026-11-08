@@ -56,10 +56,15 @@ if ($Version -eq "latest") {
         $response = $_.Exception.Response
         if ($response -and $response.Headers) {
             # PS 5.1 (.NET Framework): the header collection is a plain
-            # WebHeaderCollection — index it by name. PS 7 exposes typed
-            # HttpResponseMessageHeaders where .Location is a property; try
-            # both so the script runs under either PowerShell.
-            $location = $response.Headers["Location"]
+            # WebHeaderCollection. PS 7 exposes typed
+            # HttpResponseMessageHeaders, where the string indexer THROWS —
+            # which used to kill this catch block and made the fallback
+            # below unreachable. GetValues(name) works on both. It THROWS
+            # (not null) when the header is absent — e.g. a plain 404 —
+            # so guard it and let the friendly throw below handle that.
+            try {
+                $location = [string]($response.Headers.GetValues("Location") | Select-Object -First 1)
+            } catch { $location = $null }
             if (-not $location -and $response.Headers.Location) {
                 $location = [string]$response.Headers.Location
             }
@@ -115,7 +120,16 @@ if (Test-Path $Exe) {
     Rename-Item -Path $Exe -NewName "micke.old.exe"
     Write-Host "micke: replaced existing micke.exe (this run is an upgrade)"
 }
-Move-Item -Path $NewExe -Destination $Exe
+try {
+    Move-Item -Path $NewExe -Destination $Exe
+} catch {
+    $moveError = $_ # capture first: a failed restore would clobber $_
+    # Roll back: without micke.exe there is nothing to run — and this
+    # installer is the repair path — so restore the old binary before
+    # rethrowing.
+    try { Rename-Item -Path $OldExe -NewName "micke.exe" } catch { }
+    throw $moveError
+}
 
 # Add $Dir to the USER Path when missing (exact-segment check, idempotent).
 # The value is read expanded and written back expanded: the effective Path is
@@ -138,7 +152,11 @@ if (-not $onPath) {
 }
 
 # Register + start; re-running over an existing task re-creates and starts
-# it on the new binary. Status is informational on purpose.
+# it on the new binary. PS 5.1 does NOT throw on a native command's nonzero
+# exit, so check $LASTEXITCODE ourselves: a failed install aborts the script
+# (install.sh's set -e), while status stays informational (its `|| true`) —
+# a nonzero status must not fail the script.
 & "$Exe" service install
+if ($LASTEXITCODE -ne 0) { throw "micke: service install failed (exit $LASTEXITCODE)" }
 & "$Exe" service status
 Write-Host "micke: dashboard at http://127.0.0.1:7800/ (MICKE_PORT to change)"

@@ -37,8 +37,9 @@ After=network-online.target
 [Service]
 # WHY the explicit PATH: systemd --user gets a minimal default PATH; a rungv
 # in /usr/local/bin or ~/.local/bin would be invisible and micke would
-# self-provision a second rungv over an existing install.
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${home}/.local/bin
+# self-provision a second rungv over an existing install. Quoted whole: an
+# unquoted value with a space-containing home splits into two assignments.
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${home}/.local/bin"
 ExecStart=${JSON.stringify(exe)} daemon
 Restart=on-failure
 RestartSec=2
@@ -135,6 +136,23 @@ function fail(what: string, r: RunResult): never {
   throw new Error(`${what} failed (rc=${r.rc})${detail ? `: ${detail}` : ""}`);
 }
 
+/**
+ * schtasks /Run with a bounded retry. WHY: /End returns before the scheduler
+ * reports the instance stopped, and the task's default IgnoreNew policy
+ * refuses a /Run in that window — without the retry the daemon would just
+ * stay down. Returns the last failed result so the caller can fail() with
+ * the scheduler's own words.
+ */
+function schtasksRunWithRetry(): RunResult {
+  let last: RunResult = { rc: 1, stdout: "", stderr: "" };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) Bun.sleepSync(300);
+    last = run(["schtasks", ...schtasksArgs("", "run")]);
+    if (last.rc === 0) return last;
+  }
+  return last;
+}
+
 function requireSupportedPlatform(): void {
   if (!["linux", "darwin", "win32"].includes(process.platform)) {
     throw new Error(`no service-manager support for ${process.platform}`);
@@ -199,7 +217,11 @@ export function serviceInstall(): string {
   // win32: the per-user ONLOGON task is the whole registration.
   const create = run(["schtasks", ...schtasksArgs(exe, "create")]);
   if (create.rc !== 0) fail("schtasks /Create", create);
-  const start = run(["schtasks", ...schtasksArgs(exe, "run")]);
+  // /Create over a live task replaces the definition but leaves the old
+  // instance running, and IgnoreNew then ignores the /Run until next logon —
+  // so end it first (best-effort: it may not be running), like serviceRestart.
+  run(["schtasks", ...schtasksArgs("", "end")]);
+  const start = schtasksRunWithRetry();
   if (start.rc !== 0) fail("schtasks /Run", start);
   return `scheduled task "${WIN_TASK}" created and started (runs at logon)`;
 }
@@ -253,7 +275,14 @@ export function serviceStatus(): string {
     return `micke service: ${pid === "-" ? "loaded, not running" : `running (pid ${pid})`}`;
   }
 
-  // win32: registrationMissing() already proved /Query succeeds.
+  // win32: registrationMissing() already proved /Query succeeds. Prefer
+  // PowerShell's State enum: Get-ScheduledTask prints locale-independent
+  // names (Running/Ready/Disabled...), while schtasks /Query text is
+  // localized and /running/i only matches English. Falls back to /Query.
+  const ps = run(["powershell", "-NoProfile", "-Command", `(Get-ScheduledTask -TaskName '${WIN_TASK}').State`]);
+  if (ps.rc === 0 && ps.stdout.trim()) {
+    return `micke service: ${ps.stdout.trim().toLowerCase()}`;
+  }
   const q = run(["schtasks", ...schtasksArgs("", "query")]);
   return /running/i.test(q.stdout) ? "micke service: running" : "micke service: registered (state unknown)";
 }
@@ -278,6 +307,6 @@ export function serviceRestart(): void {
 
   // win32: end is best-effort (the task may not be running), run must start it.
   run(["schtasks", ...schtasksArgs("", "end")]);
-  const start = run(["schtasks", ...schtasksArgs("", "run")]);
+  const start = schtasksRunWithRetry();
   if (start.rc !== 0) fail("schtasks /Run", start);
 }

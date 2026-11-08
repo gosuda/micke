@@ -138,10 +138,10 @@ The download is sha256-verified against the release `SHA256SUMS` and
 swapped in atomically; a registered service is bounced (sandboxes keep
 running — the new daemon adopts them), otherwise the one-line result says
 to start with `micke service install`. On Windows the old binary steps
-aside as `micke.old.exe` (`micke.exe.old` after `micke upgrade`) — safe
-to delete. Trust model: the checksum travels with the release, so it
-protects against corruption and partial downloads, not a compromised
-publisher — strict hosts pin versions and verify signatures themselves.
+aside as `micke.old.exe` — safe to delete. Trust model: the checksum
+travels with the release, so it protects against corruption and partial
+downloads, not a compromised publisher — strict hosts pin versions and
+verify signatures themselves.
 
 ## Environment
 

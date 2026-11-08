@@ -33,7 +33,9 @@ describe("systemdUnit", () => {
 
   test("PATH spans the system dirs and the injected home's ~/.local/bin", () => {
     const unit = systemdUnit("/usr/local/bin/micke", "/home/tester");
-    expect(unit).toContain("Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/tester/.local/bin");
+    // Quoted whole: an unquoted value with a space-containing home would
+    // split into two assignments in systemd.
+    expect(unit).toContain(`Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/tester/.local/bin"`);
     expect(unit).toContain("/usr/local/bin");
     expect(unit).toContain("/home/tester/.local/bin");
   });
