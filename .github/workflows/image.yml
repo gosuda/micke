@@ -15,7 +15,7 @@
 # assembles the final manifest list. No docker/setup-qemu-action anywhere.
 #
 # Build-context contract: the Dockerfile lives in image/ but its COPY sources
-# (image/entrypoint.sh, image/driver.sh, image/micke-chromium.sh) are relative
+# (image/entrypoint.sh, image/driver.sh, image/chromium-flags.sh) are relative
 # to the REPO ROOT. The verified local build is `docker build -t micke -f
 # image/Dockerfile .` — so here context is `.` (repo root) and `file` points at
 # image/Dockerfile. Do not "fix" this to context: ./image; the COPY lines would
