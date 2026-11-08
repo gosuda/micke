@@ -1,14 +1,14 @@
 // tests/service-files.test.ts — the pure service-registration generators.
 //
-// service.ts's actions shell out to systemctl/launchctl/schtasks; this host
-// has no systemd user bus and the fast tier never invokes OS managers. The
-// generators are pure functions of their parameters, so every property here
-// is a content assertion with the home dir injected — never read from the
-// environment under test.
+// service.ts's actions shell out to systemctl/launchctl/powershell; this
+// host has no systemd user bus and the fast tier never invokes OS managers.
+// The generators are pure functions of their parameters, so every property
+// here is a content assertion with the home dir injected — never read from
+// the environment under test.
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compiledExe, launchdPlist, schtasksArgs, systemdUnit, unitPath } from "../src/service.js";
+import { compiledExe, launchdPlist, systemdUnit, unitPath, WIN_DAEMON_PS, WIN_RUNKEY_PS, WIN_TASK, WIN_TASK_PS } from "../src/service.js";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -68,29 +68,75 @@ describe("launchdPlist", () => {
   });
 });
 
-describe("schtasksArgs", () => {
-  test("create registers a forced, logon-triggered task named micke", () => {
-    const args = schtasksArgs("C:\\Program Files\\micke\\micke.exe", "create");
-    expect(args).toContain("/F");
-    expect(args).toContain("/SC");
-    expect(args).toContain("ONLOGON");
-    expect(args[args.indexOf("/TN") + 1]).toBe("micke");
-    expect(args).toContain(`"C:\\Program Files\\micke\\micke.exe" daemon`);
+describe("windows registration payloads", () => {
+  // The v0.1.1 Windows defect: schtasks /Create /SC ONLOGON is denied for a
+  // standard user even for their own account, so `micke service install`
+  // died for every non-elevated user. These pin its unelevated replacement.
+  test("the task registers with a current-user logon trigger at Limited run level", () => {
+    expect(WIN_TASK_PS.register).toContain("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME");
+    expect(WIN_TASK_PS.register).toContain("-RunLevel Limited");
+    expect(WIN_TASK_PS.register).toContain(`-TaskName '${WIN_TASK}'`);
   });
 
-  test("delete forces the task; run/end/query only name it", () => {
-    const del = schtasksArgs("C:\\micke.exe", "delete");
-    expect(del).toContain("/Delete");
-    expect(del).toContain("/F");
-    expect(del.indexOf("/F")).toBeLessThan(del.indexOf("/TN"));
-    expect(schtasksArgs("C:\\micke.exe", "run")).toEqual(["/Run", "/TN", "micke"]);
-    expect(schtasksArgs("C:\\micke.exe", "end")).toEqual(["/End", "/TN", "micke"]);
-    expect(schtasksArgs("C:\\micke.exe", "query")).toEqual(["/Query", "/TN", "micke"]);
+  test("no 72-hour execution limit: PT0S as a property assignment, not a parameter", () => {
+    // The -ExecutionTimeLimit PARAMETER silently drops a zero timespan on
+    // some builds; the property assignment works everywhere.
+    expect(WIN_TASK_PS.register).toContain("$s.ExecutionTimeLimit = 'PT0S'");
+  });
+
+  test("laptop-safe: the task may start and keep running on battery", () => {
+    expect(WIN_TASK_PS.register).toContain("-AllowStartIfOnBatteries");
+    expect(WIN_TASK_PS.register).toContain("-DontStopIfGoingOnBatteries");
+  });
+
+  test("the exe travels via $env:MICKE_EXE — no path quoting to break", () => {
+    // A path with spaces or a non-ASCII user name must never be spliced
+    // into command text; the payloads that need the exe read the env var.
+    expect(WIN_TASK_PS.register).toContain("$env:MICKE_EXE");
+    expect(WIN_RUNKEY_PS.set).toContain("$env:MICKE_EXE");
+    expect(WIN_DAEMON_PS.start).toContain("$env:MICKE_EXE");
+  });
+
+  test("stop/count hit only the daemon, never the service CLI itself", () => {
+    // Killing by image name alone would also kill `micke service ...`.
+    expect(WIN_DAEMON_PS.stop).toContain(`Name = 'micke.exe'`);
+    expect(WIN_DAEMON_PS.stop).toContain("-match ' daemon$'");
+    expect(WIN_DAEMON_PS.count).toContain("-match ' daemon$'");
+  });
+
+  test("no payload shells out to schtasks or uses a machine-wide ONLOGON trigger", () => {
+    // The denied mechanism must not creep back in through any payload.
+    const payloads = [...Object.values(WIN_TASK_PS), ...Object.values(WIN_RUNKEY_PS), ...Object.values(WIN_DAEMON_PS)];
+    for (const p of payloads) {
+      expect(p).not.toContain("schtasks");
+      expect(p).not.toContain("ONLOGON");
+    }
+  });
+});
+
+// pwsh-gated: every payload parses on a real PowerShell engine. The fast
+// tier cannot run Register-ScheduledTask (no Task Scheduler on unix), but a
+// syntax error on PS 5.1 — the target host! — is exactly the class a
+// parse check catches. Payloads are handed over base64-encoded so no
+// quoting layer can corrupt them on the way into pwsh.
+describe.skipIf(Bun.which("pwsh") === null)("windows payloads parse under a real pwsh", () => {
+  test("every payload is valid PowerShell", () => {
+    const payloads = [...Object.values(WIN_TASK_PS), ...Object.values(WIN_RUNKEY_PS), ...Object.values(WIN_DAEMON_PS)];
+    for (const p of payloads) {
+      const b64 = Buffer.from(p, "utf8").toString("base64");
+      const r = Bun.spawnSync(
+        ["pwsh", "-NoProfile", "-Command",
+          `[scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))) | Out-Null; 'ok'`],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+      );
+      const out = r.stdout.toString().trim();
+      expect(out).toBe("ok"); // a parse failure prints nothing and exits nonzero
+    }
   });
 });
 
 describe("unitPath", () => {
-  test("win32 has no file — the scheduled task IS the registration", () => {
+  test("win32 has no file — the task or Run entry IS the registration", () => {
     expect(unitPath("win32")).toBeNull();
   });
 

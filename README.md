@@ -117,8 +117,10 @@ the manager's job, not micke's own: a systemd `--user` unit
 runs at boot, not just in a login session; the unit bakes a login-like
 PATH so a hand-installed rungv in `/usr/local/bin` or `~/.local/bin`
 stays visible), a launchd agent `dev.gosuda.micke` (`KeepAlive`; log at
-`$MICKE_STATE_DIR/daemon.log`), or a Windows ONLOGON scheduled task
-`micke`. `service uninstall` / `status` / `restart` manage it, and
+`$MICKE_STATE_DIR/daemon.log`), or on Windows a logon-triggered scheduled
+task `micke` (registered unelevated; where domain policy denies task
+creation, an HKCU Run entry stands in). `service uninstall` / `status` /
+`restart` manage it, and
 `micke help` lists every command. Registration needs the compiled
 binary — a bun dev tree is refused with the remedy (from source,
 `bun start` is the daemon).
