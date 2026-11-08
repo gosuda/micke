@@ -1,13 +1,13 @@
 // tests/rfb.test.ts — the RFB-over-websockify screenshot client, fast.
 //
 // src/rfb.ts is pure host code: it needs only a WebSocket that carries bytes,
-// so the "session" here is an inline Bun.serve speaking just enough RFB to
-// answer ONE capture. The fake deliberately FRAGMENTS every server reply
-// (3 bytes per WS message) because that is the condition the client exists
+// so the "session" here is tests/fake/rfb-server.ts — a Bun.serve speaking
+// just enough RFB to answer ONE capture, with every server reply fragmented
+// across WS messages (that fragmentation is the condition the client exists
 // to survive: RFB is a byte stream, WebSocket is message-framed, and
-// websockify forwards TCP segments, which never align with protocol units.
-// The server side needs the same stream-assembling trick to parse the
-// client's messages, so both halves are exercised for real.
+// websockify forwards TCP segments, which never align with protocol units).
+// The scenario matrix lives here; the server itself is shared with
+// tests/fake/rungv so the daemon-spawned fake speaks the identical wire.
 //
 // One named test = one property (see AGENTS.md): PNG bytes, DES auth, auth
 // rejection, timeout + hangup, unsupported encoding.
@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { inflateSync } from "node:zlib";
 import { captureScreenshot, desVncResponse } from "../src/rfb.js";
+import { rfbPixel, startFakeRfbServer, type FakeRfbServer, type RfbMode } from "./fake/rfb-server.js";
 
 const FB_W = 4;
 const FB_H = 2;
@@ -23,9 +24,7 @@ const CHALLENGE = Buffer.from(Array.from({ length: 16 }, (_, i) => 0x10 + i));
 const TIMEOUT_MS = 3_000; // per-capture ceiling; tests that hang fail on this
 
 /** Recognizable, position-derived pixels so a byte-level diff names the error. */
-function pixel(x: number, y: number): [number, number, number] {
-  return [16 + x * 32, 64 + y * 16, 128 + x * 8 + y * 4];
-}
+const pixel = rfbPixel;
 
 /** What encodePng's IDAT must contain: filter-0 scanlines of exactly `pixel`. */
 function expectedScanlines(): Buffer {
@@ -41,157 +40,17 @@ function expectedScanlines(): Buffer {
   return out;
 }
 
-/** Minimal server-side byte-stream assembler over incoming WS binary messages. */
-class TestReader {
-  private buf = Buffer.alloc(0);
-  private waiter: { n: number; resolve: (b: Buffer) => void } | null = null;
-
-  push(chunk: Buffer): void {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
-    const w = this.waiter;
-    if (w && this.buf.length >= w.n) {
-      const out = Buffer.from(this.buf.subarray(0, w.n));
-      this.buf = this.buf.subarray(w.n);
-      this.waiter = null;
-      w.resolve(out);
-    }
-  }
-
-  read(n: number): Promise<Buffer> {
-    if (this.buf.length >= n) {
-      const out = Buffer.from(this.buf.subarray(0, n));
-      this.buf = this.buf.subarray(n);
-      return Promise.resolve(out);
-    }
-    return new Promise((resolve) => {
-      this.waiter = { n, resolve };
-    });
-  }
-}
-
-type Mode =
-  | "none" // security None, one raw rect -> success
-  | "auth" // ONLY security type 2, verify the DES response -> success
-  | "auth-reject" // type 2, then SecurityResult != 0
-  | "silent" // full handshake, then never send the update
-  | "bad-encoding"; // update rect with a non-raw encoding
-
-interface FakeVnc {
-  port: number;
-  stop(): void;
-  state: {
-    clientVersion: string;
-    authResponse: Buffer | null;
-    shared: number;
-    closed: boolean;
-  };
-}
-
-function startFakeVnc(mode: Mode): FakeVnc {
-  const state = { clientVersion: "", authResponse: null as Buffer | null, shared: -1, closed: false };
-  const reader = new TestReader();
-
-  async function runFlow(ws: Bun.ServerWebSocket<undefined>): Promise<void> {
-    // Everything we send is deliberately split 3 bytes at a time.
-    const frag = (b: Buffer) => {
-      for (let i = 0; i < b.length; i += 3) ws.send(b.subarray(i, i + 3));
-    };
-    const bail = (why: string): never => {
-      throw new Error(`fake-vnc: ${why}`);
-    };
-
-    frag(Buffer.from("RFB 003.008\n", "latin1"));
-    state.clientVersion = (await reader.read(12)).toString("latin1");
-    if (!/^RFB 003\.00\d\n$/.test(state.clientVersion)) bail(`bad client version ${state.clientVersion}`);
-
-    if (mode === "auth" || mode === "auth-reject") {
-      frag(Buffer.from([1, 2])); // one security type: VNC Auth (2) ONLY
-      if ((await reader.read(1))[0] !== 2) bail("client did not choose VNC Auth (2)");
-      frag(CHALLENGE);
-      state.authResponse = await reader.read(16);
-      if (!state.authResponse.equals(desVncResponse(PASSWORD, CHALLENGE))) {
-        bail("client DES response did not match desVncResponse(password, challenge)");
-      }
-      // SecurityResult: 0 = ok, nonzero = rejected
-      frag(Buffer.from([0, 0, 0, mode === "auth-reject" ? 1 : 0]));
-      if (mode === "auth-reject") return; // the client must give up here
-    } else {
-      frag(Buffer.from([1, 1])); // one security type: None (1)
-      if ((await reader.read(1))[0] !== 1) bail("client did not choose None (1)");
-      // No SecurityResult follows None in RFB 3.8.
-    }
-
-    state.shared = (await reader.read(1))[0];
-    if (state.shared !== 1) bail(`ClientInit shared must be 1 (never kick the noVNC viewer), got ${state.shared}`);
-
-    // ServerInit: 4x2, a pixel format the client must discard, name "fake".
-    frag(Buffer.concat([
-      Buffer.from([FB_W >> 8, FB_W & 0xff, FB_H >> 8, FB_H & 0xff]),
-      Buffer.alloc(16, 0),
-      Buffer.from([0, 0, 0, 4]),
-      Buffer.from("fake"),
-    ]));
-
-    // SetPixelFormat must be the exact 20-byte 32bpp/depth-24/BE request.
-    const spf = await reader.read(20);
-    const wantSpf = Buffer.from([
-      0, 0, 0, 0, 32, 24, 1, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0,
-    ]);
-    if (!spf.equals(wantSpf)) bail(`unexpected SetPixelFormat ${spf.toString("hex")}`);
-
-    if ((await reader.read(1))[0] !== 2) bail("expected SetEncodings");
-    const seRest = await reader.read(3); // pad + u16 count
-    if (seRest.readUInt16BE(1) !== 1) bail("client must request exactly one encoding");
-    if ((await reader.read(4)).readInt32BE(0) !== 0) bail("the one encoding must be raw (0)");
-
-    const ur = await reader.read(10); // FramebufferUpdateRequest
-    if (ur[0] !== 3 || ur[1] !== 0) bail("expected a non-incremental FramebufferUpdateRequest");
-    if (ur.readUInt16BE(2) !== 0 || ur.readUInt16BE(4) !== 0) bail("the request must start at 0,0");
-    if (ur.readUInt16BE(6) !== FB_W || ur.readUInt16BE(8) !== FB_H) bail("the request must cover the full screen");
-
-    if (mode === "silent") return; // handshake complete; now hold our breath
-
-    const header = Buffer.alloc(16);
-    header.writeUInt16BE(1, 2); // one rect
-    header.writeUInt16BE(FB_W, 8);
-    header.writeUInt16BE(FB_H, 10);
-    header.writeInt32BE(mode === "bad-encoding" ? 5 : 0, 12); // 5 = hextile: NOT raw
-    frag(header);
-    if (mode === "bad-encoding") return; // no pixel data after a rect we cannot honor
-
-    // Pack per the format the client requested: BE u32, V = r<<16 | g<<8 | b.
-    // V's top byte is always 0, so each pixel's wire bytes are [0, r, g, b].
-    const data = Buffer.alloc(FB_W * FB_H * 4);
-    for (let y = 0; y < FB_H; y++) {
-      for (let x = 0; x < FB_W; x++) {
-        const [r, g, b] = pixel(x, y);
-        const p = (y * FB_W + x) * 4;
-        data[p + 1] = r;
-        data[p + 2] = g;
-        data[p + 3] = b;
-      }
-    }
-    frag(data);
-  }
-
-  const server = Bun.serve({
-    port: 0,
-    fetch(req, srv) {
-      if (srv.upgrade(req)) return; // any path: websockify never routes
-      return new Response("websocket only", { status: 426 });
-    },
-    websocket: {
-      open: (ws) => {
-        runFlow(ws).catch(() => {
-          try { ws.close(); } catch { /* already gone */ }
-        });
-      },
-      message: (_ws, msg) => reader.push(Buffer.from(msg as Buffer)),
-      close: () => { state.closed = true; },
-    },
+/** One scenario fake on a kernel-picked port; dims/pixels pinned so the
+ * assertions below name any drift in the shared server's defaults. */
+function startFakeVnc(mode: RfbMode): FakeRfbServer {
+  return startFakeRfbServer({
+    mode,
+    width: FB_W,
+    height: FB_H,
+    pixel: rfbPixel,
+    password: PASSWORD,
+    challenge: CHALLENGE,
   });
-
-  return { port: server.port, stop: () => server.stop(true), state };
 }
 
 describe("captureScreenshot (RFB through websockify)", () => {

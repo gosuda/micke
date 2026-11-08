@@ -16,12 +16,15 @@
 //
 // `run` binds two real loopback listeners, prints the exact publish lines and
 // the desktop-ready line, and serves the fake guest (tests/fake/guest.ts) on
-// the 7801 mapping. SIGTERM exits 0; SIGKILL kills it like any process, so
+// the 7801 mapping. The 6080 mapping is the whole noVNC stack in miniature
+// (tests/fake/rfb-server.ts): the viewer page over plain HTTP, RFB over ANY
+// WebSocket upgrade. SIGTERM exits 0; SIGKILL kills it like any process, so
 // session_close's escalation is exercised for real.
 
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeGuest } from "./guest.ts";
+import { startFakeRfbServer } from "./rfb-server.ts";
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "";
@@ -90,15 +93,23 @@ const guest = startFakeGuest({
   session: hostname,
   logPath: process.env.MICKE_FAKE_SHELL_LOG,
 });
-const novnc = Bun.serve({
-  hostname: "127.0.0.1",
-  port: 0,
-  development: false,
-  fetch: () =>
+// The noVNC port: plain HTTP keeps serving the viewer page (the dashboard
+// test fetches /vnc.html), and any WebSocket upgrade runs the minimal RFB
+// server — websockify never routes by path, and the daemon's screenshot
+// client connects here at /websockify. MICKE_FAKE_CAPTURE_DELAY_MS holds
+// each capture open, so tests can observe whether concurrent captures of
+// one session are serialized (logged as novnc_capture events).
+// MICKE_FAKE_NOVNC_MODE=drop makes the upgrade die immediately: a
+// half-dead noVNC for the 502 path, without waiting out any timeout.
+const novnc = startFakeRfbServer({
+  mode: process.env.MICKE_FAKE_NOVNC_MODE === "drop" ? "drop" : "none",
+  captureDelayMs: Number.parseInt(process.env.MICKE_FAKE_CAPTURE_DELAY_MS ?? "0", 10) || 0,
+  http: () =>
     new Response(
       "<!DOCTYPE html><html><head><title>noVNC (fake)</title></head><body><h1>noVNC</h1></body></html>",
       { headers: { "content-type": "text/html; charset=utf-8" } },
     ),
+  onEvent: (ev) => log({ ev: "novnc_capture", phase: ev.type, inflight: ev.inFlight }),
 });
 
 log({ ev: "run_start", session: hostname, pid: process.pid, guest_port: guest.port, novnc_port: novnc.port });
@@ -110,7 +121,7 @@ say("micke: desktop ready");
 
 const shutdown = () => {
   try { guest.stop(); } catch { /* already closed */ }
-  try { novnc.stop(true); } catch { /* already closed */ }
+  try { novnc.stop(); } catch { /* already closed */ }
   log({ ev: "run_exit", session: hostname, pid: process.pid });
   process.exit(0);
 };

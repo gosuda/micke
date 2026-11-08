@@ -54,6 +54,13 @@ export interface SessionRow {
   uptime_seconds: number;
 }
 
+/** What a per-session endpoint that talks TO the sandbox needs: identity and
+ * the noVNC (websockify) host port — nothing else. */
+export interface SessionHandle {
+  session_id: string;
+  novnc_host_port: number;
+}
+
 interface LiveSession extends io.SessionRecord {
   shell: ShellChannel | null;
   child: io.SessionProcess | null;
@@ -308,6 +315,23 @@ export class Supervisor {
       throw new MickeError("SESSION_NOT_FOUND", `no session "${id}"`, "Call session_list first.");
     }
     return this.shellFor(live).run(command, timeoutMs, maxOutputBytes, cwd);
+  }
+
+  /**
+   * Lookup for an endpoint that must connect INTO a session (the web
+   * screenshot route): the noVNC host port, or a structured error. Mirrors
+   * runShell's lookup (live map first, then orphaned records) but does NOT
+   * run listSessions' reaping on purpose: a read must not delete pidfiles,
+   * and a sandbox that died unnoticed keeps answering "ready" here so the
+   * caller's own connection — and its failure mapping — discovers the truth.
+   */
+  getSession(id: string): SessionHandle {
+    const live = this.sessions.get(id);
+    if (live) return { session_id: id, novnc_host_port: live.novnc_host_port };
+    if (this.orphanStates.has(id)) {
+      throw new MickeError("SESSION_ORPHANED", `session "${id}" has a pidfile but its sandbox is gone`, "Close it with session_close, then create a fresh one.");
+    }
+    throw new MickeError("SESSION_NOT_FOUND", `no session "${id}"`, "Call session_list to see live and orphaned sessions.");
   }
 
   async listSessions(): Promise<SessionRow[]> {
