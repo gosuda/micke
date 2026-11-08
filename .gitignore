@@ -1,3 +1,5 @@
 node_modules/
 opencode.json
 *.log
+# release binaries + SHA256SUMS (scripts/build.ts); disposable build output
+dist/
