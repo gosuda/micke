@@ -45,6 +45,13 @@ guest-writable (uid 1000) or `session_create` fails fast with
 line to `<MICKE_STATE_DIR>/audit.log` (tool, session, command, duration,
 outcome — never output bodies).
 
+The same port also serves the micke dashboard: open `http://127.0.0.1:7800/`
+in a browser to create and delete sessions, view a screenshot of a live
+desktop, or open a session's noVNC in-page (or in a new tab) — all on the
+loopback origin. The dashboard is a single-file SPA over a small JSON API
+under `/api/*` on the same port (curl works too); web actions are audited as
+`web.*` lines in the same audit log.
+
 ## Environment
 
 | Variable | Default | Meaning |

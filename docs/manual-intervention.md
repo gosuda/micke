@@ -10,11 +10,12 @@ call — and hand the desk back.
    the session: e.g. "I'm paused on session `a1b2c3d4` at the SSO login; I
    need a human to log in over noVNC."
 2. **The human opens that session's noVNC URL** — from `session_list` (ready
-   rows carry `novnc_url`) or the dashboard table at
-   `http://127.0.0.1:7800/` (the default; `MICKE_PORT` changes it — one row
-   per session, noVNC link in the last column). Both the dashboard and the
-   noVNC URL are loopback-only, so the browser must run on (or tunnel to) the
-   daemon host.
+   rows carry `novnc_url`) or the micke dashboard at
+   `http://127.0.0.1:7800/` (the default; `MICKE_PORT` changes it — it lists
+   sessions, shows a screenshot of each desktop so you can check its state
+   without opening VNC, and opens a session's noVNC in-page or in a new tab).
+   Both the dashboard and the noVNC URL are loopback-only, so the browser must
+   run on (or tunnel to) the daemon host.
    The noVNC page shows and can drive the live desktop, but remote view is
    non-fatal: if x11vnc/websockify are not running, the session still reports
    `ready` and the URL can be dead; the agent can check `/tmp/x11vnc.log` and
