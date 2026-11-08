@@ -12,14 +12,39 @@ restarts — the next daemon adopts them from per-session pidfiles.
 
 ## Quick start
 
-Requirements: Linux/macOS/Windows on x86_64 or arm64, Bun. That's all —
-`rungv` (gvx) is optional: when none is installed (no `MICKE_RUNGV`, nothing
-on PATH), the first `session_create` downloads the pinned gvx release into
-`~/.cache/micke/bin/rungv-<tag>/` and uses it (see below).
+One command, nothing pre-installed — no Bun, no rungv (gvx): the first
+`session_create` self-provisions rungv (see below). Linux (x86_64/arm64)
+or macOS (Apple Silicon only — gvx publishes no darwin-amd64, so micke
+doesn't either):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gosuda/micke/main/install.sh | sh
+# pin a tag instead of latest:
+curl -fsSL https://raw.githubusercontent.com/gosuda/micke/main/install.sh | sh -s -- v0.2.0
+```
+
+Windows (PowerShell 5.1+, amd64/arm64):
+
+```powershell
+irm https://raw.githubusercontent.com/gosuda/micke/main/install.ps1 | iex
+# pinned: download once, then run it with the tag
+irm https://raw.githubusercontent.com/gosuda/micke/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version v0.2.0
+```
+
+The script resolves the latest release via the `/releases/latest` redirect
+(or takes the pinned tag), downloads the raw single-file binary for the
+platform, verifies it against the release `SHA256SUMS`, installs it as
+`micke` in `~/.local/bin` (`MICKE_BIN_DIR` to change; Windows:
+`%LOCALAPPDATA%\micke\micke.exe` plus the user PATH), then runs
+`micke service install` + `service status` and prints the dashboard URL
+`http://127.0.0.1:7800/` (`MICKE_PORT` to change).
+
+From source (the dev path — this is the one that needs Bun):
 
 ```sh
 bun install
-bun start   # daemon on http://127.0.0.1:7800/ (MCP + dashboard; no auto-restart)
+bun start   # foreground daemon on http://127.0.0.1:7800/ (MCP + dashboard; no auto-restart)
 ```
 
 Prefer to install gvx yourself (air-gapped hosts, or a build you control)?
@@ -82,6 +107,42 @@ loopback origin. The dashboard is a single-file SPA over a small JSON API
 under `/api/*` on the same port (curl works too); web actions are audited as
 `web.*` lines in the same audit log.
 
+## Background service
+
+`micke service install` registers the daemon with the OS-native per-user
+service manager — no sudo anywhere; the daemon binds loopback only and gvx
+needs no root — and starts it now AND at login/boot. Crash-restart stays
+the manager's job, not micke's own: a systemd `--user` unit
+(`Restart=on-failure`, plus best-effort `loginctl enable-linger` so micke
+runs at boot, not just in a login session; the unit bakes a login-like
+PATH so a hand-installed rungv in `/usr/local/bin` or `~/.local/bin`
+stays visible), a launchd agent `dev.gosuda.micke` (`KeepAlive`; log at
+`$MICKE_STATE_DIR/daemon.log`), or a Windows ONLOGON scheduled task
+`micke`. `service uninstall` / `status` / `restart` manage it, and
+`micke help` lists every command. Registration needs the compiled
+binary — a bun dev tree is refused with the remedy (from source,
+`bun start` is the daemon).
+
+## Upgrades
+
+Re-running the installer over an existing install replaces the binary and
+bounces the service — that IS the upgrade path. From an installed micke
+there is also:
+
+```sh
+micke upgrade             # latest release
+micke upgrade v0.2.0      # a tag pins one; same-tag reinstall is the repair path
+```
+
+The download is sha256-verified against the release `SHA256SUMS` and
+swapped in atomically; a registered service is bounced (sandboxes keep
+running — the new daemon adopts them), otherwise the one-line result says
+to start with `micke service install`. On Windows the old binary steps
+aside as `micke.old.exe` (`micke.exe.old` after `micke upgrade`) — safe
+to delete. Trust model: the checksum travels with the release, so it
+protects against corruption and partial downloads, not a compromised
+publisher — strict hosts pin versions and verify signatures themselves.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -94,6 +155,10 @@ under `/api/*` on the same port (curl works too); web actions are audited as
 | `MICKE_RUNGV_DIR` | `$XDG_CACHE_HOME/micke/bin` (`~/.cache/micke/bin`) | Where the downloaded rungv lives (`rungv-<tag>/<binary>`) |
 | `MICKE_RUNGV_RELEASE_BASE` | `https://github.com/gfire-sigs/gvx/releases` | Base URL for the release download (`/download/<tag>/<file>`) |
 | `MICKE_RUNGV_AUTO_DOWNLOAD` | `1` | `0` disables self-provisioning: a missing rungv is then a plain `RUNGV_UNAVAILABLE` |
+| `MICKE_REPO` | `gosuda/micke` | GitHub repo the installers install from (`-Repo` param on Windows) |
+| `MICKE_RELEASE_BASE` | `https://github.com/$MICKE_REPO/releases` | Releases base URL for the installers AND `micke upgrade` (mirrors, air-gapped hosts) |
+| `MICKE_BIN_DIR` | `~/.local/bin` | Where install.sh installs the binary |
+| `MICKE_VERSION` | `latest` | Tag install.sh installs; a positional `sh -s -- <tag>` wins (ps1: `-Version`) |
 | `MICKE_STATE_DIR` | `$XDG_STATE_HOME/micke` (`~/.local/state/micke`) | Pidfiles + logs + workspaces + instance lock |
 | `MICKE_SESSION_MEMORY` | `2g` | Per-sandbox `rungv -m` guard |
 | `MICKE_BOOT_TIMEOUT_MS` | `30000` | Wait for the driver's `micke: desktop ready` line |
@@ -111,6 +176,15 @@ MICKE_E2E=1 bun test tests/     # E2E tier: real image
 
 Rules live in [AGENTS.md](AGENTS.md). Further docs:
 [docs/manual-intervention.md](docs/manual-intervention.md) (human login over noVNC).
+
+## Releasing (maintainers)
+
+Push a `v*` tag: CI runs the fast test tier, cross-compiles the five
+release assets + `SHA256SUMS` (linux amd64/arm64, darwin arm64, windows
+amd64/arm64) and publishes the GitHub release. The asset names are the
+updater's contract — `scripts/build.ts` asserts them against
+`assetNameFor` in `src/selfupdate.ts` and fails the build on drift.
+Local: `bun run build` (dev-labeled binaries in `dist/`).
 
 ## Building the image (maintainers)
 
