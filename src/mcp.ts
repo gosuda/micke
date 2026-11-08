@@ -14,22 +14,14 @@ import { auditToolCall, flatCmd } from "./audit.js";
 import { defaultStateDir } from "./gvxio.js";
 
 const CREATE_DESC = [
-  "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its novnc_url and session_id.",
-  "A host workspace is always mounted at /workspace: pass an absolute existing directory, or omit it and micke creates one beside the pidfile — the receipt's `workspace` is where artifacts written to /workspace land on the host. gvx has no uid mapping, so an explicit workspace must be writable by the guest (uid 1000): otherwise session_create fails fast with WORKSPACE_NOT_WRITABLE and the exact chmod remedy. The auto-created workspace is chmod 0777 for this reason.",
-  "Open chromium with `micke-chromium <url>` (required flags pre-baked); open novnc_url in a browser to watch or take over the desktop.",
-  "Then run ALL commands through session_shell on that session_id — env is pre-sourced, `agent-desktop` works directly.",
+  "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its session_id and novnc_url.",
+  "Open novnc_url in a browser to watch or take over the desktop.",
 ].join(" ");
 
 const SHELL_DESC = [
-  "Run bash in the session. EVERY call is a fresh, independent bash: cwd and exported env do NOT persist from one call to the next (`cd /tmp` or `export FOO=bar` in one call is gone by the next). Make each call self-contained — `cd /tmp && ls`, `PATH=/x:$PATH cmd`, `FOO=bar cmd` — or pass `cwd` to start in another absolute directory (default /home/agent; a missing directory fails with CWD_INVALID). The desktop env (DISPLAY, D-Bus, AT-SPI) is already sourced in every fresh bash, so agent-desktop and micke-chromium work with no setup.",
-  "THE DESKTOP LOOP, in order (`micke-help` in the session reprints it; `agent-desktop --help`/`skills` predate these helpers and their `press`/`type` paths are broken here — see below): launch `micke-chromium <url>` → find with `micke-find <text> [--role R]` (prints REF<TAB>ROLE<TAB>NAME) → `agent-desktop click \"<ref>\"` → type: click the field first, then `micke-type '<text>'` → keys: `micke-key <combo>` → verify: `micke-state` (one JSON line {\"alive\",\"title\",\"url\",\"refs\"}; exit 1 = no browser).",
-  "Finding detail: `micke-find` wraps ONE filtered snapshot — `agent-desktop snapshot --app chromium -i --compact | jq -r '.. | objects | select(.role?==\"link\") | [.ref_id,.name] | @tsv'` (filter IN the command — full trees are large) — and after a click, `agent-desktop wait --window TITLE --app chromium`. Below-fold `click`/`scroll-to` can time out: `micke-key ctrl+End`, re-find, then click. Prefer it to `agent-desktop find`: find needs `--first` and then still spends its whole budget. A `truncated:true` snapshot receipt retries once at a higher `--timeout-ms`.",
-  "Verify cheaply with `micke-state`: no files, ~2 s, and it answers \"is the browser alive\" and \"did the click/navigation land\" — gate on a changed window title or URL, or a moved ref count. A dead browser is otherwise silent: `list-apps`/`list-windows` return `[]`, `screenshot` still succeeds, and `session_list` still says `ready` — gate on `micke-state`, and relaunch with `micke-chromium <url>` after a death. `agent-desktop press` can SIGSEGV chromium on this image (rc 139): send keys with `micke-key <combo>` instead. Headless `agent-desktop type` is refused on real pages (ACTION_NOT_SUPPORTED / POLICY_DENIED): `micke-type` pastes instead (one quoted arg; clipboard + ctrl+v); `agent-desktop --headed type` (focus fallback) also works — the agent-desktop-native alternative. Verify what landed with `jq '.. | objects | select(.name?==\"<field label>\") | .value'` on one snapshot.",
-  "Take a screenshot ONLY when a human must see it: they asked for one, the answer exists only in pixels, or you are reporting a visual defect. Never screenshot to verify a click — nothing consumes the PNG; verify with window title / URL / ref_count instead. Write any screenshot to /workspace so it lands on the host.",
-  "For page CONTENT (reading, headlines, article text) use `micke-page-text <url> [--links]` — headless dump-dom -> small JSON. Heavy pages truncate the a11y tree; don't snapshot what you only need to read.",
-  "`agent-desktop` exits non-zero when its JSON envelope reports ok:false, so `set -e` and `&&` are trustworthy; read the envelope for the error code.",
-  "Calls run in parallel up to a per-session cap (default 8, MICKE_SHELL_CONCURRENCY; beyond it they queue briefly), so a long command no longer blocks the session. A crash in one call cannot wedge the next: there is no persistent shell to wedge.",
-  "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}; no stdin.",
+  "Run bash in the session. EVERY call is a fresh bash: cwd and exported env do NOT persist between calls, so make each command self-contained.",
+  "Drive desktop apps with `agent-desktop` (`agent-desktop --help` is the manual).",
+  "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}.",
 ].join(" ");
 
 const TOOLS = [
