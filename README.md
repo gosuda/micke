@@ -179,11 +179,29 @@ Rules live in [AGENTS.md](AGENTS.md). Further docs:
 
 ## Releasing (maintainers)
 
-Push a `v*` tag: CI runs the fast test tier, cross-compiles the five
-release assets + `SHA256SUMS` (linux amd64/arm64, darwin arm64, windows
-amd64/arm64) and publishes the GitHub release. The asset names are the
-updater's contract — `scripts/build.ts` asserts them against
-`assetNameFor` in `src/selfupdate.ts` and fails the build on drift.
+The front door is one command — it releases a git hash end to end:
+
+```sh
+bun run release [<hash>] [<tag>]   # --dry-run prints the plan; --skip-tests skips the gate
+```
+
+The hash defaults to HEAD and must already be on origin/main (the script
+never pushes main). The tag, when not given, is derived from the
+conventional-commit subjects since the nearest `v*` tag: any
+`feat!`/`fix!`/`perf!`/`refactor!` subject → major, `feat` → minor, else
+patch — and the first release ever seeds package.json's version. The
+script reruns the fast test tier in a detached worktree at the exact
+hash, pushes the annotated tag, and watches the CI run through to the
+release URL.
+
+Underneath, the primitive is unchanged — a pushed `v*` tag: manual
+`git tag -a vX.Y.Z -m "micke vX.Y.Z" <sha>` + `git push origin
+refs/tags/vX.Y.Z` does the same thing. CI runs the fast test tier,
+cross-compiles the five release assets + `SHA256SUMS` (linux
+amd64/arm64, darwin arm64, windows amd64/arm64) and publishes the
+GitHub release. The asset names are the updater's contract —
+`scripts/build.ts` asserts them against `assetNameFor` in
+`src/selfupdate.ts` and fails the build on drift.
 Local: `bun run build` (dev-labeled binaries in `dist/`).
 
 ## Building the image (maintainers)

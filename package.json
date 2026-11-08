@@ -8,7 +8,8 @@
     "start": "bun run src/main.ts",
     "test": "bun test tests/",
     "test:e2e": "MICKE_E2E=1 bun test tests/",
-    "build": "bun scripts/build.ts"
+    "build": "bun scripts/build.ts",
+    "release": "bun scripts/release.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
