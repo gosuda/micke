@@ -152,7 +152,10 @@ export function startFakeRfbServer(opts: FakeRfbOptions = {}): FakeRfbServer {
     } else {
       frag(Buffer.from([1, 1])); // one security type: None (1)
       if ((await reader.read(1))[0] !== 1) bail("client did not choose None (1)");
-      // No SecurityResult follows None in RFB 3.8.
+      // RFC 6143: RFB 3.8 sends a SecurityResult u32 for EVERY security
+      // type, None included — real x11vnc answers the None selection with
+      // 00 00 00 00 before ServerInit.
+      frag(Buffer.from([0, 0, 0, 0]));
     }
 
     state.shared = (await reader.read(1))[0];

@@ -287,10 +287,21 @@ export async function captureScreenshot(
       stream.send(desVncResponse(password!, challenge));
       const result = (await stream.readExact(4, "the VNC-auth result")).readUInt32BE(0);
       if (result !== 0) throw new Error(`rfb: VNC authentication rejected by the server (result ${result})`);
+    } else {
+      // Per RFC 6143 (§7.1.3/§7.2.1 and Appendix A.2), RFB 3.8 sends a
+      // SecurityResult u32 for EVERY security type, None included — it is
+      // 3.7 and earlier that omit it for None. Skipping this read eats the
+      // first ServerInit bytes (real x11vnc sends 00 00 00 00 here, so the
+      // width parsed as 0 and every password-less capture died as "0x0").
+      const result = (await stream.readExact(4, "the SecurityResult")).readUInt32BE(0);
+      if (result !== 0) {
+        const len = (await stream.readExact(4, "the auth failure reason")).readUInt32BE(0);
+        const reason = len
+          ? (await stream.readExact(len, "the auth failure reason")).toString("utf8")
+          : "";
+        throw new Error(`rfb: security type None rejected by the server (result ${result}): ${reason || "(no reason given)"}`);
+      }
     }
-    // Security type None in RFB 3.8 sends NO SecurityResult — reading a u32
-    // here would eat the first ServerInit byte. (3.3 always sends one; we
-    // never speak 3.3.)
 
     // -- ClientInit ------------------------------------------------------------
     // shared=1: join the desktop WITHOUT disconnecting whoever is already
