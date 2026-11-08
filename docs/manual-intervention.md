@@ -22,6 +22,9 @@ call — and hand the desk back.
    desktop because the browser crashed or was never launched: check liveness
    with `agent-desktop list-apps` (or `list-windows`, or a `snapshot`) and
    relaunch with `agent-desktop launch chromium --arg=<url>` before pausing.
+   Note that `agent-browser`'s chromium is headless — it never appears on
+   the VNC display, whatever the agent did with it; a browser the human
+   must see or drive has to be the `agent-desktop launch chromium` one.
 3. **The human acts** — e.g. completes the SSO login. The credential goes
    from the human's fingers into the desktop, not through the agent: micke
    has no keylogger and no VNC-side input API, so the credential does not
@@ -56,7 +59,10 @@ Give this to the agent (adapt the trigger) to bind the behavior above:
 
 > You are driving a micke session. ALL desktop interaction goes through the
 > session's shell (`session_shell`) with `agent-desktop`. Each call is a fresh
-> bash (cwd/env do not persist), so make commands self-contained. When you hit
+> bash (cwd/env do not persist), so make commands self-contained. If a human
+> must take over a web login, open that page with `agent-desktop launch
+> chromium --arg=<url>` — `agent-browser`'s headless chromium cannot be seen
+> or driven over noVNC. When you hit
 > something only a human should do — an SSO/password prompt, a CAPTCHA, a
 > payment confirmation, or a judgment call — do this, exactly:
 > 1. Stop interacting with the desktop. Announce in your reply: "PAUSED on

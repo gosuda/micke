@@ -1,20 +1,24 @@
 # micke — a desk for AI agents.
 #
-# A headless Linux desktop for agent-desktop
-# (https://github.com/vercel-labs/agent-desktop), which drives desktop apps
-# through the AT-SPI accessibility tree instead of pixel matching.
+# A headless Linux desktop for two agent CLIs, split by target: agent-browser
+# (https://github.com/vercel-labs/agent-browser) drives web pages in chromium
+# over CDP, and agent-desktop (https://github.com/vercel-labs/agent-desktop)
+# drives other desktop apps through the AT-SPI accessibility tree instead of
+# pixel matching.
 #
 # Base: Debian 12 (bookworm) — glibc 2.36 clears agent-desktop's 2.35 floor,
 # ships a real (non-snap) chromium package, and at-spi2-core 2.46 avoids the
 # Ubuntu 22.04 ATK-bridge bug (aborts on Action.GetActions).
 #
 # The agent-facing surface is STOCK: Debian's chromium, the stock
-# agent-desktop CLI, nothing micke-specific on PATH. micke ships only infra
-# (micke-entrypoint, micke-driver) and one /etc/chromium.d fragment baking in
-# the flags chromium needs inside the sandbox, so the sanctioned URL route —
-# `agent-desktop launch chromium --arg=<url>` — starts a browser that is both
-# alive (--no-sandbox) and drivable (--force-renderer-accessibility) with no
-# wrapper script in between.
+# agent-browser and agent-desktop CLIs, nothing micke-specific on PATH —
+# agent-browser for web work, agent-desktop for other desktop apps. micke
+# ships only infra (micke-entrypoint, micke-driver) and one /etc/chromium.d
+# fragment baking in the flags chromium needs inside the sandbox, so every
+# launch route — agent-browser's exec, `agent-desktop launch chromium
+# --arg=<url>`, a bare shell `chromium` — starts a browser that is both
+# alive (--no-sandbox) and drivable (--force-renderer-accessibility) with
+# no wrapper script in between.
 
 FROM debian:bookworm-slim
 
@@ -77,8 +81,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # stock shell-toolbox, kept for one-line JSON handling in sessions.
         python3 \
         jq \
-        # --- agent-desktop CLI (npm >= 18; the package bundles the native
-        #     binary and the agent-desktop-linux-clipboard-owner helper) ----
+        # --- agent CLIs via npm -g: agent-desktop (bundles its native binary
+        #     + the agent-desktop-linux-clipboard-owner helper) and
+        #     agent-browser (bundles a prebuilt Rust binary; zero runtime
+        #     node deps) ----------------------------------------------------
         nodejs \
         npm \
         ca-certificates \
@@ -95,6 +101,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # intact — at /usr/local/bin/agent-desktop. The `version` call is the
 # post-install sanity check.
 RUN npm install -g agent-desktop@1.2.0 && agent-desktop version
+
+# Stock agent-browser CLI (the web half of the split), pinned the same way.
+# - System chromium, never `agent-browser install`: the Chrome-for-Testing
+#   download has no linux-arm64 builds (Debian's chromium is the only
+#   arm64-viable browser), and agent-browser execs the Debian
+#   /usr/bin/chromium wrapper, so the baked /etc/chromium.d flags ride along
+#   here exactly like on every other launch route. It also appends
+#   --no-sandbox itself when /.dockerenv exists (always true under gvx) —
+#   belt and suspenders on top of the fragment.
+# - It runs headless by default (no DISPLAY), so it never disturbs the VNC
+#   desktop; the daemon persists across separate bash invocations with
+#   state under $XDG_RUNTIME_DIR/agent-browser.
+# - npm WARN EBADENGINE is expected and harmless: the package's engines
+#   (node >=24) is metadata-only, and the npm package bundles the prebuilt
+#   Rust binary (x64 + arm64) with ZERO runtime node deps — npm 9.2 installs
+#   it fine. `--version` is the post-install sanity check.
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+    # The guest network may be restricted; skip the outbound chrome-CVE
+    # version check so behavior is deterministic offline.
+    AGENT_BROWSER_NO_VERSION_CHECK=1
+RUN npm install -g agent-browser@0.41.2 && agent-browser --version
 
 # agent-desktop's state root (~/.agent-desktop, mode 0700) and the session
 # bus are per-user; never run the desktop as root.

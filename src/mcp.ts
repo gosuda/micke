@@ -14,13 +14,13 @@ import { auditToolCall, flatCmd } from "./audit.js";
 import { defaultStateDir } from "./gvxio.js";
 
 const CREATE_DESC = [
-  "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-desktop + noVNC) and return its session_id and novnc_url.",
+  "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-browser + agent-desktop + noVNC) and return its session_id and novnc_url.",
   "Open novnc_url in a browser to watch or take over the desktop.",
 ].join(" ");
 
 const SHELL_DESC = [
   "Run bash in the session. EVERY call is a fresh bash: cwd and exported env do NOT persist between calls, so make each command self-contained.",
-  "Drive desktop apps with `agent-desktop` (`agent-desktop --help` is the manual).",
+  "Web/Chromium work goes through `agent-browser`, other desktop apps through `agent-desktop` (`--help` is the manual for both).",
   "Returns {stdout, stderr, rc, timed_out, truncated, duration_ms}.",
 ].join(" ");
 

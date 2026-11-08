@@ -1,7 +1,8 @@
 // tests/e2e/stock-surface.test.ts — the stock image surface, real image.
 //
 // a9f9508 deleted every guest helper CLI and the agent-desktop shim: the image
-// is stock Debian + chromium + pinned agent-desktop@1.2.0, with the chromium
+// is stock Debian + chromium + pinned agent-desktop@1.2.0 + pinned
+// agent-browser@0.41.2 (the web half of the agent surface), with the chromium
 // flags baked via /etc/chromium.d. These are the residue checks that genuinely
 // need the real image — one property per test, on one shared session:
 //
@@ -11,6 +12,9 @@
 //      --force-renderer-accessibility) on the MAIN chromium process, read from
 //      /proc/[0-9]*/cmdline (the image ships no procps).
 //   4. The desktop is drivable: a compact snapshot returns ok with refs.
+//   5. agent-browser reports the pinned 0.41.2.
+//   6. The baked AGENT_BROWSER_EXECUTABLE_PATH is set and its target is an
+//      executable — agent-browser must find the system chromium wrapper.
 //
 // agent-desktop@1.2.0 quirk: `wait` rejects --timeout/--timeout-ms
 // (INVALID_ARGS — --help only offers --wait-timeout for --wait-for polling),
@@ -18,7 +22,8 @@
 //
 // Requires an image built from >= a9f9508 (e.g. a local micke:dev or the next
 // ghcr push): the published ghcr.io/gosuda/micke:latest predating it still
-// carries the helpers and fails test 1 by design.
+// carries the helpers and fails test 1 by design; tests 5-6 additionally need
+// an image with the agent-browser layer.
 //
 // Run: MICKE_E2E=1 MICKE_IMAGE=micke:dev bun test tests/e2e/stock-surface.test.ts
 
@@ -82,6 +87,23 @@ describe.skipIf(!E2E)("e2e: stock surface", () => {
     const env = JSON.parse(r.stdout.trim().split("\n")[0]);
     expect(env.ok).toBe(true);
     expect(env.data.version).toBe("1.2.0");
+  }, 60_000);
+
+  test("agent-browser --version exits 0 and reports the pinned 0.41.2", async () => {
+    const r = await shell("agent-browser --version", { timeout_ms: 30_000 });
+    expect(r.rc).toBe(0);
+    expect(r.stdout.trim()).toContain("0.41.2");
+  }, 60_000);
+
+  test("the baked AGENT_BROWSER_EXECUTABLE_PATH is set and its target is executable", async () => {
+    // agent-browser must land on the Debian /usr/bin/chromium wrapper (the
+    // /etc/chromium.d flags ride along through it); no network, no browser.
+    const r = await shell(
+      `test -n "$AGENT_BROWSER_EXECUTABLE_PATH" && printf '%s' "$AGENT_BROWSER_EXECUTABLE_PATH" && test -x "$AGENT_BROWSER_EXECUTABLE_PATH"`,
+      { timeout_ms: 30_000 },
+    );
+    expect(r.rc).toBe(0);
+    expect(r.stdout).toBe("/usr/bin/chromium");
   }, 60_000);
 
   test("launch chromium is ok and the MAIN process carries both baked flags", async () => {

@@ -6,7 +6,8 @@ micke gives AI agents a disposable Linux desktop (Xvfb + a minimal XFCE
 session + AT-SPI + chromium, mirrored over noVNC) inside a gvx sandbox, driven
 over MCP. One
 `session_create` = one fresh sandbox; the agent works through `session_shell`
-(`agent-desktop` snapshot → act on `@ref` → wait). Sessions survive daemon
+— `agent-browser` for web pages, `agent-desktop` for other desktop apps
+(snapshot → act on `@ref` → wait). Sessions survive daemon
 restarts — the next daemon adopts them from per-session pidfiles.
 
 ## Quick start
@@ -22,8 +23,9 @@ bun start   # daemon on http://127.0.0.1:7800/ (MCP + dashboard; no auto-restart
 Connect any Streamable-HTTP MCP client to `http://127.0.0.1:7800/mcp`. The
 surface is exactly four tools — `session_create`, `session_list`,
 `session_close`, `session_shell` — driving a stock guest: Debian + chromium +
-pinned `agent-desktop@1.2.0` (`agent-desktop --help` is the manual; the
-sanctioned URL route is `agent-desktop launch chromium --arg=<url>`). OpenCode
+pinned `agent-browser@0.41.2` + `agent-desktop@1.2.0` (web/Chromium work
+through `agent-browser`, other desktop apps through `agent-desktop`; `--help`
+is the manual for both). OpenCode
 example (`oauth: false` matters for the no-auth loopback server):
 
 ```json
