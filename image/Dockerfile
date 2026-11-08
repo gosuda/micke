@@ -26,14 +26,41 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     DISPLAY=:99 \
     XDG_RUNTIME_DIR=/tmp/xdg-runtime \
-    # No desktop settings daemon runs in this container, so Chromium needs
-    # this to join the accessibility bus (agent-desktop docs, troubleshooting).
+    # Chromium's GTK layer looks at ACCESSIBILITY_ENABLED to join the a11y
+    # bus (agent-desktop docs, troubleshooting). Kept even though the XFCE
+    # session now runs xfsettingsd: the env var is deterministic at every
+    # launch route, whatever the settings daemon did or didn't set yet.
     ACCESSIBILITY_ENABLED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         # --- session stack -------------------------------------------------
         xvfb \
-        openbox \
+        # Minimal XFCE desktop, replacing openbox (a9f9508 ran openbox):
+        #   - GTK3, so apps register on AT-SPI natively — same toolkit
+        #     family as chromium, the best agent-desktop compatibility.
+        #   - xfwm4 is EWMH-compliant: agent-desktop's list-windows /
+        #     focus-window need a real EWMH WM (openbox was minimal EWMH
+        #     too, but gave no panel/desktop for human takeover).
+        #   - xfce4-notifyd gives desktop notifications somewhere to be
+        #     displayed: apps can post them and a human sees them over
+        #     noVNC (with openbox they went nowhere). agent-desktop's own
+        #     list-notifications is GNOME-Shell-only on Linux and returns
+        #     PLATFORM_NOT_SUPPORTED here — an upstream attribution policy
+        #     (it refuses any notification daemon the detected shell
+        #     doesn't own), not a dead daemon.
+        #   - xfce4-terminal + thunar are for human takeover over noVNC
+        #     (SSO login flows, see docs/manual-intervention.md).
+        # Deliberately NOT installed: the xfce4 metapackage (drag in
+        # artwork/power/pulse extras) and gvfs (thunar degrades gracefully
+        # without it: no trash/network volumes — irrelevant headless).
+        xfce4-session \
+        xfwm4 \
+        xfce4-panel \
+        xfce4-settings \
+        xfdesktop4 \
+        xfce4-notifyd \
+        xfce4-terminal \
+        thunar \
         dbus \
         dbus-x11 \
         at-spi2-core \
@@ -81,7 +108,13 @@ RUN groupadd -g "$GID" "$USERNAME" \
 # along on every launch. See image/chromium-flags.sh for what and why.
 COPY image/chromium-flags.sh /etc/chromium.d/00-micke.sh
 
-# The desktop session bootstrap: Xvfb + a11y bus + openbox + VNC/noVNC.
+# xfwm4 compositing OFF, baked as a system-wide xfconf default (the user
+# account has no ~/.config/xfce4 yet, so the seeded channel file wins).
+# Compositing is meaningless under Xvfb and costs CPU. Applied by xfconf's
+# per-channel default lookup on the first read of the xfwm4 channel.
+COPY image/xfwm4.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+
+# The desktop session bootstrap: Xvfb + a11y bus + XFCE session + VNC/noVNC.
 COPY image/entrypoint.sh /usr/local/bin/micke-entrypoint
 RUN chmod 0755 /usr/local/bin/micke-entrypoint
 

@@ -29,7 +29,8 @@ wrapper the browser starts from — nothing to pass (or forget) per launch.
 
 ## Real Xvfb, not headless
 
-The desktop is a real X server (Xvfb + openbox, mirrored over VNC). There is
+The desktop is a real X server (Xvfb + a minimal XFCE session, mirrored over
+VNC). There is
 no `--headless` anywhere: it hides extensions, WebGL, font rendering and
 native dialogs, and its a11y tree is not the real widget tree. Screen size is
 set at `session_create` (`screen`), not with chromium flags.

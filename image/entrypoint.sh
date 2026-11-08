@@ -6,8 +6,12 @@
 #                   focus control are unsupported on Wayland sessions)
 #   2. a11y bus   — AT-SPI accessibility bus agent-desktop speaks; started
 #                   BEFORE any app because an app that starts before the bus
-#                   never registers on it
-#   3. openbox    — minimal EWMH window manager
+#                   never registers on it. Started manually, not via
+#                   xfsettingsd/autostart: it must win the race against
+#                   everything xfce4-session spawns.
+#   3. xfce4-session — minimal XFCE desktop session: spawns xfwm4 (EWMH WM),
+#                   xfce4-panel, xfdesktop and xfsettingsd, and honours
+#                   /etc/xdg/autostart (xfce4-notifyd rides in that way)
 #   4. x11vnc     — mirrors the display on :5900 for remote view; optional
 #                   VNC password via MICKE_VNC_PASSWORD
 #   5. websockify — serves the noVNC web client on :6080, proxying
@@ -24,7 +28,11 @@
 #   . /tmp/session.env && agent-desktop status
 #
 # Modeled on agent-desktop's own container smoke test
-# (scripts/linux-container-smoke.sh in vercel-labs/agent-desktop).
+# (scripts/linux-container-smoke.sh in vercel-labs/agent-desktop), which
+# boots openbox. micke diverges from that reference: the smoke test only
+# needs any WM, while micke runs a minimal XFCE session (GTK3 → native
+# AT-SPI, xfwm4 for EWMH window ops, xfce4-notifyd for notifications,
+# xfce4-terminal + thunar for human takeover over noVNC).
 set -euo pipefail
 
 # The runtime dir must exist before dbus-run-session starts the bus.
@@ -51,7 +59,9 @@ if [ "${1:-}" = "--desktop" ]; then
 
     /usr/libexec/at-spi-bus-launcher --launch-immediately >/tmp/atspi.log 2>&1 &
 
-    openbox >/tmp/openbox.log 2>&1 &
+    # DISPLAY + the D-Bus session are inherited from dbus-run-session above;
+    # xfce4-session is the session leader that spawns the rest of the DE.
+    xfce4-session >/tmp/xfce4.log 2>&1 &
 
     printf "export XDG_RUNTIME_DIR=%s DISPLAY=%s DBUS_SESSION_BUS_ADDRESS='%s'\n" \
         "$XDG_RUNTIME_DIR" "$DISPLAY" "${DBUS_SESSION_BUS_ADDRESS:-}" >/tmp/session.env

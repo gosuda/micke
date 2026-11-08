@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- micke: system-wide xfconf default for xfwm4, seeded at /etc/xdg/xfce4/
+     xfconf/xfce-perchannel-xml/xfwm4.xml (the first xfconf lookup per channel
+     merges this file unless the user's ~/.config/xfce4/xfconf overrides it).
+     Compositing is OFF: under Xvfb there is no real display to composite, so
+     the extra X server round trips would only cost CPU and slow the session
+     down. Verify after boot with:
+       xfconf-query -c xfwm4 -p /use_compositing   # -> false -->
+<channel name="xfwm4" version="1.0">
+  <property name="use_compositing" type="bool" value="false"/>
+</channel>

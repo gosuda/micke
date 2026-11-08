@@ -2,8 +2,9 @@
 
 > micke — a desk for AI agents.
 
-micke gives AI agents a disposable Linux desktop (Xvfb + openbox + AT-SPI +
-chromium, mirrored over noVNC) inside a gvx sandbox, driven over MCP. One
+micke gives AI agents a disposable Linux desktop (Xvfb + a minimal XFCE
+session + AT-SPI + chromium, mirrored over noVNC) inside a gvx sandbox, driven
+over MCP. One
 `session_create` = one fresh sandbox; the agent works through `session_shell`
 (`agent-desktop` snapshot → act on `@ref` → wait). Sessions survive daemon
 restarts — the next daemon adopts them from per-session pidfiles.
