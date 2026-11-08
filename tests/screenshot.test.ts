@@ -2,7 +2,7 @@
 //
 // The endpoint composes three layers — supervisor lookup, per-session
 // capture serialization, and the RFB client from src/rfb.ts — and the fake
-// rungv's 6080 port now speaks real RFB over WebSocket (tests/fake/
+// rungv's 6080 port speaks real RFB over WebSocket (tests/fake/
 // rfb-server.ts), so every request crosses the whole daemon stack for real.
 // One named test = one property; every session is closed in a finally, and
 // every daemon/listener a test starts is gone by afterAll.

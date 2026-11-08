@@ -213,7 +213,3 @@ docker build -t micke:dev -f image/Dockerfile .
 docker save micke:dev -o micke.tar
 rungv load -cache-dir ~/.cache/micke/gvx -i micke.tar
 ```
-
-## License
-
-TBD

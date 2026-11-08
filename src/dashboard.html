@@ -21,7 +21,6 @@
   #banner { background: #fde8e8; border: 1px solid #f0b4b4; color: #7a1f1f;
             padding: .5rem .8rem; border-radius: 6px; margin-bottom: 1rem; }
 
-  /* Create form */
   #create { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
   #create input { padding: .4rem .6rem; border: 1px solid #bbb;
                   border-radius: 6px; min-width: 15rem; }
@@ -123,9 +122,8 @@
 
 // SECURITY: every value that arrives from the API — session ids, image names,
 // workspace paths, error strings, URLs — passes through esc() before it is
-// interpolated into HTML below (same contract as the old server-rendered
-// page). No eval, no new Function, no innerHTML built from unescaped API
-// data.
+// interpolated into HTML below. No eval, no new Function, no innerHTML built
+// from unescaped API data.
 const esc = (s) => String(s)
   .replace(/&/g, "&amp;")
   .replace(/</g, "&lt;")
@@ -133,8 +131,7 @@ const esc = (s) => String(s)
   .replace(/"/g, "&quot;")
   .replace(/'/g, "&#39;");
 
-// "2m 31s"-style uptime — mirrors the humanUptime() the old server-rendered
-// page had; the SPA owns the semantics now (dashboard.ts keeps no copy).
+// "2m 31s"-style uptime — the SPA owns the semantics.
 function humanUptime(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   const d = Math.floor(s / 86400);

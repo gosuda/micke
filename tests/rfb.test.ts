@@ -23,7 +23,6 @@ const PASSWORD = "sesame";
 const CHALLENGE = Buffer.from(Array.from({ length: 16 }, (_, i) => 0x10 + i));
 const TIMEOUT_MS = 3_000; // per-capture ceiling; tests that hang fail on this
 
-/** Recognizable, position-derived pixels so a byte-level diff names the error. */
 const pixel = rfbPixel;
 
 /** What encodePng's IDAT must contain: filter-0 scanlines of exactly `pixel`. */

@@ -1,7 +1,7 @@
 # image — build and push the multi-arch micke desktop image to ghcr.io.
 #
 # Purpose: the maintainer-side build leg of the pull-based image distribution.
-# micke's runtime is gvx-only (owner MUST 2026-11-02): users `rungv pull` this
+# micke's runtime is gvx-only: users `rungv pull` this
 # image (set MICKE_IMAGE), never build it. Docker is used HERE as the build
 # tool (Buildx/build-push-action) and `docker save` → `rungv load` remains the
 # air-gapped ingest fallback — Docker is not a session runtime. This workflow

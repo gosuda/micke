@@ -4,8 +4,8 @@
 // The page is static by design: it embeds no session data, rows arrive via
 // /api/sessions. These tests pin the shell contract (title, mount element,
 // inline script), prove the served HTML is session-independent while the
-// API carries the rows, and keep the one live property of the old
-// server-rendered page — a ready session's novnc_url really serves noVNC.
+// API carries the rows, and keep the live property the SPA must uphold — a
+// ready session's novnc_url really serves noVNC.
 // Loopback bind and 404s stay. All fast tier.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
