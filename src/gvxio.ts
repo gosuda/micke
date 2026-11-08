@@ -7,13 +7,21 @@
 // at launch and persisted in <state>/sessions/<id>.json — that pidfile is the
 // session identity (gvx has no labels, ps, or daemon state).
 
-import { mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 export const DEFAULT_IMAGE = "ghcr.io/gosuda/micke:latest";
 export const DEFAULT_SCREEN = "1280x800x24";
+
+/**
+ * The gvx release micke self-provisions when no rungv is installed. Pinned,
+ * never "latest": gvx cuts several releases a day and its on-disk formats
+ * (EROFS layers, .gvx_meta) have broken across releases before, so every micke
+ * host must run the one known-good tag. Bump deliberately, alongside testing.
+ */
+export const RUNGV_DEFAULT_VERSION = "v0.10.10032026110200";
 
 /** Guest ports. The host ports are kernel-picked and come from stderr. */
 export const SHELL_GUEST_PORT = 7801;
@@ -27,9 +35,52 @@ export interface GvxResult {
   stderr: string;
 }
 
-/** Path to the rungv binary (MICKE_RUNGV override for dev/absolute paths). */
+/** Path to the rungv binary: MICKE_RUNGV → PATH → micke's managed copy. */
 export function rungvBinary(): string {
-  return process.env.MICKE_RUNGV || "rungv";
+  if (process.env.MICKE_RUNGV) return process.env.MICKE_RUNGV;
+  if (whichRungv()) return "rungv";
+  const managed = managedRungvPath();
+  if (existsSync(managed)) return managed;
+  return "rungv"; // nothing found; `rungv …` fails with rc 127 and callers report
+}
+
+/**
+ * First executable `rungv` on PATH, or null. Hand-rolled (not Bun.which)
+ * because micke re-resolves on every call and tests swap PATH at runtime;
+ * Bun.which keeps answering from the process's original PATH.
+ */
+export function whichRungv(): string | null {
+  const sep = process.platform === "win32" ? ";" : ":";
+  for (const dir of (process.env.PATH ?? "").split(sep)) {
+    if (!dir) continue;
+    const candidate = join(dir, rungvBinaryName());
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* not there / not executable — keep looking */ }
+  }
+  return null;
+}
+
+/** Directory holding micke-managed rungv versions (one subdir per tag). */
+export function rungvBinDir(): string {
+  return process.env.MICKE_RUNGV_DIR
+    ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "micke", "bin");
+}
+
+/** The gvx release tag to provision (MICKE_RUNGV_VERSION overrides the pin). */
+export function rungvVersion(): string {
+  return process.env.MICKE_RUNGV_VERSION || RUNGV_DEFAULT_VERSION;
+}
+
+/** rungv.exe on Windows, rungv everywhere else (matches the release archives). */
+export function rungvBinaryName(): string {
+  return process.platform === "win32" ? "rungv.exe" : "rungv";
+}
+
+/** Absolute path of the managed binary for the current version pin. */
+export function managedRungvPath(): string {
+  return join(rungvBinDir(), `rungv-${rungvVersion()}`, rungvBinaryName());
 }
 
 /** micke owns its EROFS layer cache; never the gvx default and never a tmpfs. */
@@ -261,7 +312,7 @@ export function procMatches(pid: number, sessionId: string): boolean {
   const argv = line.split(/\s+/).filter(Boolean);
   if (!argv.some((a) => {
     const b = basename(a);
-    return b === "rungv" || b.startsWith("rungv-");
+    return b === "rungv" || b === "rungv.exe" || b.startsWith("rungv-");
   })) return false;
   return argv.includes(`micke-${sessionId}`);
 }

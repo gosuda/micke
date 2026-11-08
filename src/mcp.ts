@@ -16,6 +16,7 @@ import { defaultStateDir } from "./gvxio.js";
 const CREATE_DESC = [
   "Boot a disposable Linux desktop (gvx sandbox: Xvfb + chromium + agent-browser + agent-desktop + noVNC) and return its session_id and novnc_url.",
   "Open novnc_url in a browser to watch or take over the desktop — windows the CLIs open (agent-browser's chromium included) are live there, so the user can follow the work and interact with the same desktop over VNC.",
+  "Needs no host setup: when `rungv` is not installed, micke downloads the pinned gvx release itself (mac/win/linux) into ~/.cache/micke/bin and uses it; the first create on such a host takes a little longer.",
 ].join(" ");
 
 const SHELL_DESC = [

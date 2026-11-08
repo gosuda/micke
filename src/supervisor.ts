@@ -12,6 +12,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, openSync, readSync, sta
 import { isAbsolute, join } from "node:path";
 import { dlopen } from "bun:ffi";
 import * as io from "./gvxio.js";
+import { installManagedRungv } from "./rungvinstall.js";
 import { ShellChannel, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, type ShellResult } from "./shell.js";
 import { guestCanWrite, guestIds } from "./workspace.js";
 
@@ -134,13 +135,53 @@ export class Supervisor {
       }
     }
     this.checkMemoryFloor();
-    if (!(await io.rungvAvailable())) {
-      throw new MickeError("RUNGV_UNAVAILABLE", "the rungv binary is not available", "Install gvx and put `rungv` on PATH (or set MICKE_RUNGV to its absolute path).");
-    }
     return this.withBootLock(() => this.bootSession(image, workspace, screen));
   }
 
+  /**
+   * rungv must run before anything else can. Resolution order is gvxio's:
+   * MICKE_RUNGV → PATH → micke's managed copy in ~/.cache/micke/bin. When the
+   * user installed rungv themselves and it is broken, report it — never
+   * silently download over an explicit installation. Only a host with NO
+   * rungv anywhere gets the self-provisioned download (mac/win/linux), and
+   * MICKE_RUNGV_AUTO_DOWNLOAD=0 turns that off for air-gapped hosts.
+   * MUST run under the boot lock: one download, never beside a live session.
+   */
+  private async ensureRungv(): Promise<void> {
+    if (await io.rungvAvailable()) return;
+    const where = process.env.MICKE_RUNGV
+      ? `MICKE_RUNGV (${process.env.MICKE_RUNGV})`
+      : io.whichRungv()
+        ? "`rungv` on PATH"
+        : null;
+    if (where) {
+      throw new MickeError(
+        "RUNGV_UNAVAILABLE",
+        `the rungv binary at ${where} does not run (\`rungv version\` failed)`,
+        "Fix that installation, or point MICKE_RUNGV at a working `rungv`.",
+      );
+    }
+    if (process.env.MICKE_RUNGV_AUTO_DOWNLOAD === "0") {
+      throw new MickeError(
+        "RUNGV_UNAVAILABLE",
+        "the rungv binary is not available and auto-download is disabled (MICKE_RUNGV_AUTO_DOWNLOAD=0)",
+        "Install gvx and put `rungv` on PATH, or set MICKE_RUNGV to its absolute path.",
+      );
+    }
+    try {
+      const path = await installManagedRungv();
+      console.error(`micke: no rungv found — installed gvx ${io.rungvVersion()} to ${path}`);
+    } catch (err) {
+      throw new MickeError(
+        "RUNGV_INSTALL_FAILED",
+        `downloading rungv failed: ${err instanceof Error ? err.message : String(err)}`,
+        "Install gvx manually (github.com/gfire-sigs/gvx/releases) and put `rungv` on PATH, or set MICKE_RUNGV — no route to GitHub is the usual cause. MICKE_RUNGV_VERSION pins the tag.",
+      );
+    }
+  }
+
   private async bootSession(image: string, workspace: string | null, screen: string): Promise<SessionRow> {
+    await this.ensureRungv();
     await this.ensureImage(image);
 
     const id = randId();

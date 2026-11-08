@@ -26,6 +26,7 @@ const STATUS: Record<string, number> = {
   SESSION_ORPHANED: 409, // known but stale: close it, then create fresh
   SCREENSHOT_FAILED: 502, // the record is ready; its websockify/x11vnc path is not
   RUNGV_UNAVAILABLE: 503, // host setup issue; may fix itself without micke
+  RUNGV_INSTALL_FAILED: 503, // self-provisioning failed; a retry or manual install fixes it
   LOCK_HELD: 503, // a twin instance is mid-exit; retry shortly
 };
 
