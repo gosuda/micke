@@ -110,9 +110,12 @@ RUN npm install -g agent-desktop@1.2.0 && agent-desktop version
 #   here exactly like on every other launch route. It also appends
 #   --no-sandbox itself when /.dockerenv exists (always true under gvx) —
 #   belt and suspenders on top of the fragment.
-# - It runs headless by default (no DISPLAY), so it never disturbs the VNC
-#   desktop; the daemon persists across separate bash invocations with
-#   state under $XDG_RUNTIME_DIR/agent-browser.
+# - It runs headed by default (AGENT_BROWSER_HEADED=1 below): every shell
+#   sources /tmp/session.env, so the daemon inherits the session Xvfb
+#   DISPLAY and chromium opens as a real window on the desktop x11vnc
+#   mirrors — the human can watch the agent browse over VNC/noVNC. The
+#   daemon persists across separate bash invocations with state under
+#   $XDG_RUNTIME_DIR/agent-browser.
 # - npm WARN EBADENGINE is expected and harmless: the package's engines
 #   (node >=24) is metadata-only, and the npm package bundles the prebuilt
 #   Rust binary (x64 + arm64) with ZERO runtime node deps — npm 9.2 installs
@@ -120,7 +123,11 @@ RUN npm install -g agent-desktop@1.2.0 && agent-desktop version
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
     # The guest network may be restricted; skip the outbound chrome-CVE
     # version check so behavior is deterministic offline.
-    AGENT_BROWSER_NO_VERSION_CHECK=1
+    AGENT_BROWSER_NO_VERSION_CHECK=1 \
+    # Stock agent-browser env var (not a micke wrapper): make the visible
+    # window the default instead of headless, so the VNC desktop shows the
+    # agent's chromium while it works.
+    AGENT_BROWSER_HEADED=1
 RUN npm install -g agent-browser@0.41.2 && agent-browser --version
 
 # agent-desktop's state root (~/.agent-desktop, mode 0700) and the session

@@ -15,6 +15,8 @@
 //   5. agent-browser reports the pinned 0.41.2.
 //   6. The baked AGENT_BROWSER_EXECUTABLE_PATH is set and its target is an
 //      executable — agent-browser must find the system chromium wrapper.
+//   7. The baked AGENT_BROWSER_HEADED=1 reaches every command shell, so the
+//      daemon's default launch is a visible window on the VNC desktop.
 //
 // agent-desktop@1.2.0 quirk: `wait` rejects --timeout/--timeout-ms
 // (INVALID_ARGS — --help only offers --wait-timeout for --wait-for polling),
@@ -104,6 +106,17 @@ describe.skipIf(!E2E)("e2e: stock surface", () => {
     );
     expect(r.rc).toBe(0);
     expect(r.stdout).toBe("/usr/bin/chromium");
+  }, 60_000);
+
+  test("the baked AGENT_BROWSER_HEADED is 1 in every command shell", async () => {
+    // agent-browser reads this stock env var at browser launch: with it set,
+    // the daemon's default chromium is a visible window on the session Xvfb
+    // display (x11vnc mirrors it) instead of a hidden headless browser.
+    // Asserting the env, not the window: the launch behavior is agent-browser
+    // stock code, the image only supplies the default.
+    const r = await shell(`printf '%s' "$AGENT_BROWSER_HEADED"`, { timeout_ms: 30_000 });
+    expect(r.rc).toBe(0);
+    expect(r.stdout).toBe("1");
   }, 60_000);
 
   test("launch chromium is ok and the MAIN process carries both baked flags", async () => {
