@@ -83,8 +83,8 @@ jobs:
           # single-platform digests; keep attestations out until signing
           # so the index is exactly the two platform manifests.
           provenance: false
-          cache-from: type=gha,scope=micke-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}
+          cache-from: type=gha,scope=micke-${{ matrix.arch }}-${{ github.ref }}
+          cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}-${{ github.ref }}
 
       - name: Export digest
         run: |
@@ -139,4 +139,3 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect ghcr.io/gosuda/micke:${{ steps.meta.outputs.version }}
-

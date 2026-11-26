@@ -32,6 +32,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4 # the version the cross-compile matrix was verified with
+          no-cache: true
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -46,4 +47,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "micke ${GITHUB_REF_NAME}" --generate-notes
-
