@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7 # same major the image workflow pins
@@ -46,3 +46,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "micke ${GITHUB_REF_NAME}" --generate-notes
+
