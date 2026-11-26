@@ -8,9 +8,8 @@
 # is the only place the image is built going forward.
 #
 # Platform builds are NATIVE, not emulated:
-#   - linux/amd64 -> ubuntu-latest
-#   - linux/arm64 -> ubuntu-24.04-arm (GitHub-hosted Arm runner, free for
-#     PUBLIC repos; the label does not exist for private repos)
+#   - linux/amd64 -> depot-ubuntu-24.04-4
+#   - linux/arm64 -> depot-ubuntu-24.04-arm-4
 # Each job builds and pushes its single platform by digest; the `merge` job
 # assembles the final manifest list. No docker/setup-qemu-action anywhere.
 #
@@ -46,10 +45,10 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: depot-ubuntu-24.04-4
             arch: amd64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm # native Arm runner; no QEMU
+            runner: depot-ubuntu-24.04-arm-4 # native Arm runner; no QEMU
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -103,7 +102,7 @@ jobs:
 
   merge:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -140,3 +139,4 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect ghcr.io/gosuda/micke:${{ steps.meta.outputs.version }}
+
