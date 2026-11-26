@@ -65,6 +65,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Hash the full ref for the cache scope
+        id: cache_scope
+        shell: bash
+        run: |
+          ref_hash="$(printf '%s' "$GITHUB_REF" | sha256sum | cut -d ' ' -f1)"
+          printf 'ref=%s\n' "$ref_hash" >> "$GITHUB_OUTPUT"
+
       # One platform per native runner; push by digest so the merge job can
       # assemble a manifest list without rebuilding under emulation.
       - name: Build and push by digest (${{ matrix.platform }})
@@ -83,8 +90,8 @@ jobs:
           # single-platform digests; keep attestations out until signing
           # so the index is exactly the two platform manifests.
           provenance: false
-          cache-from: type=gha,scope=micke-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}
+          cache-from: type=gha,scope=micke-${{ matrix.arch }}-${{ steps.cache_scope.outputs.ref }}
+          cache-to: type=gha,mode=max,scope=micke-${{ matrix.arch }}-${{ steps.cache_scope.outputs.ref }}
 
       - name: Export digest
         run: |
@@ -139,4 +146,3 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect ghcr.io/gosuda/micke:${{ steps.meta.outputs.version }}
-
